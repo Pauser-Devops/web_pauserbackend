@@ -8,6 +8,9 @@ import { getCurrentPeriod, isQuestionAvailableToday, parseId } from "../utils/fr
 import { calcDeadline } from "../utils/deadline.ts";
 import { matchesTrigger } from "../utils/flowHelpers.ts";
 
+const todayStart = () => { const d = new Date(); return new Date(d.getFullYear(), d.getMonth(), d.getDate()); };
+const todayEnd = () => { const d = new Date(); return new Date(d.getFullYear(), d.getMonth(), d.getDate(), 23, 59, 59, 999); };
+
 const storage = multer.diskStorage({
   destination: (req, file, cb) => {
     const uploadPath = path.join(process.cwd(), "uploads");
@@ -23,10 +26,12 @@ const upload = multer({ storage });
 
 const router = Router();
 
+// GET /api/evaluations/campaigns/active — campaña activa vigente (check fecha)
 router.get("/campaigns/active", authMiddleware, async (req: AuthRequest, res) => {
   try {
+    const now = new Date();
     const campaign = await prisma.campaign.findFirst({
-      where: { isActive: true },
+      where: { isActive: true, startDate: { lte: now }, endDate: { gte: now } },
       orderBy: { startDate: "desc" },
     });
     res.json(campaign);
@@ -79,10 +84,21 @@ router.post("/submit", authMiddleware, async (req: AuthRequest, res) => {
       return res.status(400).json({ error: "Campaña no encontrada" });
     }
 
-    // Get all questions for this user's cargo
+    // Get questions: campaign-scoped if assigned, otherwise global active
     const userCargoId = req.user!.cargoId;
+
+    const campaignQuestions = await prisma.campaignQuestion.findMany({
+      where: { campaignId },
+      select: { questionId: true },
+    });
+
+    const campaignQuestionIds = campaignQuestions.map(cq => cq.questionId);
+
     const allQuestions = await prisma.question.findMany({
-      where: { isActive: true },
+      where: {
+        isActive: true,
+        ...(campaignQuestionIds.length > 0 && { id: { in: campaignQuestionIds } }),
+      },
       include: {
         cargos: true,
         options: true,
@@ -91,7 +107,6 @@ router.post("/submit", authMiddleware, async (req: AuthRequest, res) => {
     });
 
     const relevantQuestions = allQuestions.filter((q) => {
-      if (q.cargos.length === 0) return false;
       return q.cargos.some((qc) => qc.cargoId === userCargoId);
     });
 
@@ -104,9 +119,8 @@ router.post("/submit", authMiddleware, async (req: AuthRequest, res) => {
         include: { answers: { include: { files: true } } },
       });
     } else {
-      // For EXCELENCIA, use unique constraint (4 fields: userId, campaignId, source, programId)
-      evaluation = await prisma.evaluation.findUnique({
-        where: { userId_campaignId_source_programId: { userId, campaignId, source, programId: null } },
+      evaluation = await prisma.evaluation.findFirst({
+        where: { userId, campaignId, source, programId: null },
         include: { answers: { include: { files: true } } },
       });
     }
@@ -595,10 +609,9 @@ router.get("/results", authMiddleware, async (req: AuthRequest, res) => {
       const userCargoId = evaluation.user.cargoId;
 
       // Get questions that apply to this user's cargo
-      const relevantQuestions = allQuestions.filter((q) => {
-        if (q.cargos.length === 0) return false;
-        return q.cargos.some((qc) => qc.cargoId === userCargoId);
-      });
+    const relevantQuestions = allQuestions.filter((q) => {
+      return q.cargos.some((qc) => qc.cargoId === userCargoId);
+    });
 
       // Calculate maxScore based on current questions and their max option scores
       const currentMaxScore = relevantQuestions.reduce((sum, q) => {
@@ -660,10 +673,20 @@ router.get("/progress", authMiddleware, async (req: AuthRequest, res) => {
       return res.status(403).json({ error: "Solo admins pueden ver avances" });
     }
 
-    const campaign = await prisma.campaign.findFirst({
-      where: { isActive: true },
-      orderBy: { startDate: "desc" },
-    });
+    const { campaignId } = req.query;
+    const now = new Date();
+
+    let campaign;
+    if (campaignId) {
+      campaign = await prisma.campaign.findUnique({
+        where: { id: parseInt(campaignId as string) },
+      });
+    } else {
+      campaign = await prisma.campaign.findFirst({
+        where: { isActive: true, startDate: { lte: now }, endDate: { gte: now } },
+        orderBy: { startDate: "desc" },
+      });
+    }
 
     if (!campaign) {
       return res.json({ campaign: null, progress: [] });
@@ -678,8 +701,17 @@ router.get("/progress", authMiddleware, async (req: AuthRequest, res) => {
       },
     });
 
+    const campaignQuestions = await prisma.campaignQuestion.findMany({
+      where: { campaignId: campaign.id },
+      select: { questionId: true },
+    });
+    const campaignQuestionIds = campaignQuestions.map(cq => cq.questionId);
+
     const allQuestions = await prisma.question.findMany({
-      where: { isActive: true },
+      where: {
+        isActive: true,
+        ...(campaignQuestionIds.length > 0 && { id: { in: campaignQuestionIds } }),
+      },
       include: { configs: true, cargos: true },
     });
 
@@ -700,7 +732,6 @@ router.get("/progress", authMiddleware, async (req: AuthRequest, res) => {
 
         // Solo contar preguntas que tienen cargo(s) asignados Y coinciden con el cargo del usuario
         const relevantQuestions = allQuestions.filter((q) => {
-          if (q.cargos.length === 0) return false;
           return q.cargos.some((qc) => qc.cargoId === userCargoId);
         });
 
@@ -810,9 +841,25 @@ router.get("/my-result", authMiddleware, async (req: AuthRequest, res) => {
     const userCargoId = req.user!.cargoId;
     const { source = "EXCELENCIA", programId } = req.query;
 
-    const campaign = await prisma.campaign.findFirst({
-      where: { isActive: true },
+    const now = new Date();
+    const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    const todayEnd = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59, 999);
+
+    let campaign = await prisma.campaign.findFirst({
+      where: {
+        isActive: true,
+        startDate: { lte: todayEnd },
+        endDate: { gte: today },
+      },
+      orderBy: { startDate: "desc" },
     });
+
+    if (!campaign) {
+      campaign = await prisma.campaign.findFirst({
+        where: { isActive: true, endDate: { lt: today } },
+        orderBy: { endDate: "desc" },
+      });
+    }
 
     if (!campaign) {
       return res.json({ evaluation: null, message: "No hay campaña activa" });
@@ -847,8 +894,8 @@ router.get("/my-result", authMiddleware, async (req: AuthRequest, res) => {
       });
     } else {
       // For EXCELENCIA: use 4-field unique constraint
-      evaluation = await prisma.evaluation.findUnique({
-        where: { userId_campaignId_source_programId: { userId, campaignId: campaign.id, source: source as string, programId: null } },
+      evaluation = await prisma.evaluation.findFirst({
+        where: { userId, campaignId: campaign.id, source: source as string, programId: null },
         include: {
           answers: {
             include: {
@@ -873,8 +920,17 @@ router.get("/my-result", authMiddleware, async (req: AuthRequest, res) => {
     }
 
     // Recalculate scores based on current questions
+    const campaignQuestions = await prisma.campaignQuestion.findMany({
+      where: { campaignId: campaign.id },
+      select: { questionId: true },
+    });
+    const campaignQuestionIds = campaignQuestions.map(cq => cq.questionId);
+
     const allQuestions = await prisma.question.findMany({
-      where: { isActive: true },
+      where: { 
+        isActive: true,
+        ...(campaignQuestionIds.length > 0 && { id: { in: campaignQuestionIds } })
+      },
       include: { 
         cargos: true,
         options: true,
@@ -883,7 +939,6 @@ router.get("/my-result", authMiddleware, async (req: AuthRequest, res) => {
     });
 
     const relevantQuestions = allQuestions.filter((q) => {
-      if (q.cargos.length === 0) return false;
       return q.cargos.some((qc) => qc.cargoId === userCargoId);
     });
 
@@ -1003,8 +1058,8 @@ router.get("/my-history", authMiddleware, async (req: AuthRequest, res) => {
       });
     } else {
       // For EXCELENCIA: use 4-field unique constraint
-      evaluation = await prisma.evaluation.findUnique({
-        where: { userId_campaignId_source_programId: { userId, campaignId: campaign.id, source: source as string, programId: null } },
+      evaluation = await prisma.evaluation.findFirst({
+        where: { userId, campaignId: campaign.id, source: source as string, programId: null },
         include: {
           answers: {
             include: {
@@ -1300,7 +1355,17 @@ router.get("/question-availability", authMiddleware, async (req: AuthRequest, re
     const { programId, source = "EXCELENCIA" } = req.query;
     const userId = req.user!.id;
     
-    const campaign = await prisma.campaign.findFirst({ where: { isActive: true } });
+    const now = new Date();
+    const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    const todayEnd = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59, 999);
+
+    const campaign = await prisma.campaign.findFirst({
+      where: {
+        isActive: true,
+        startDate: { lte: todayEnd },
+        endDate: { gte: today },
+      },
+    });
     if (!campaign) return res.json({ questions: [], message: "No hay campaña activa" });
 
     // Obtener preguntas según source
@@ -1313,11 +1378,19 @@ router.get("/question-availability", authMiddleware, async (req: AuthRequest, re
       questionIds = qps.map(qp => qp.questionId);
     } else {
       const userCargoId = req.user!.cargoId;
+
+      const campaignQuestions = await prisma.campaignQuestion.findMany({
+        where: { campaignId: campaign.id },
+        select: { questionId: true },
+      });
+      const campaignQuestionIds = campaignQuestions.map(cq => cq.questionId);
+
       const questions = await prisma.question.findMany({
         where: {
           cargos: { some: { cargoId: userCargoId || 0 } },
           targetType: { in: ["EXCELENCIA", "AMBOS"] },
           isActive: true,
+          ...(campaignQuestionIds.length > 0 && { id: { in: campaignQuestionIds } }),
         },
         select: { id: true },
       });
@@ -1334,7 +1407,6 @@ router.get("/question-availability", authMiddleware, async (req: AuthRequest, re
       orderBy: { periodStart: "desc" },
     });
 
-    const now = new Date();
     const availability = questions.map(q => {
       const qSubmissions = submissions.filter(s => s.questionId === q.id);
 

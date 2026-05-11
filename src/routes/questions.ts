@@ -81,7 +81,7 @@ router.post("/", authMiddleware, async (req: AuthRequest, res) => {
       return res.status(403).json({ error: "Solo admins pueden crear preguntas" });
     }
 
-    const { text, description, configs, order, cargoIds, frequencyType, frequencyDay, frequencyInterval, options, targetType, flow, selectors } = req.body;
+    const { text, description, configs, order, cargoIds, frequencyType, frequencyDay, frequencyInterval, options, targetType, flow, selectors, category } = req.body;
 
     console.log("POST /api/questions - Body received:", JSON.stringify(req.body, null, 2));
 
@@ -89,16 +89,22 @@ router.post("/", authMiddleware, async (req: AuthRequest, res) => {
       return res.status(400).json({ error: "El texto de la pregunta es requerido" });
     }
 
-    if (!configs || !Array.isArray(configs) || configs.length === 0) {
-      return res.status(400).json({ error: "Debes configurar al menos un tipo de archivo" });
-    }
-
     let finalOptions = options;
     if (!finalOptions || !Array.isArray(finalOptions) || finalOptions.length === 0) {
       return res.status(400).json({ error: "Debes agregar al menos una opción de respuesta con puntaje" });
     }
 
-    const parsedOrder = order !== undefined ? parseInt(order, 10) : 0;
+    // Auto-assign order: place new question at the end
+    let parsedOrder: number;
+    if (order !== undefined && parseInt(order, 10) > 0) {
+      parsedOrder = parseInt(order, 10);
+    } else {
+      const maxOrderResult = await prisma.question.aggregate({
+        where: { isActive: true },
+        _max: { order: true },
+      });
+      parsedOrder = (maxOrderResult._max.order ?? 0) + 1;
+    }
     const validFreqTypes = ["UNICA", "DIARIA", "SEMANAL", "MENSUAL", "ANUAL", "DIA_ESPECIFICO"];
     const parsedFreqType = frequencyType && validFreqTypes.includes(frequencyType) ? frequencyType : "UNICA";
     const parsedFreqDay = frequencyDay !== undefined && frequencyDay !== null ? parseInt(frequencyDay, 10) : null;
@@ -115,12 +121,15 @@ router.post("/", authMiddleware, async (req: AuthRequest, res) => {
         frequencyDay: parsedFreqDay,
         frequencyInterval: parsedFreqInterval,
         targetType: parsedTarget,
-        configs: {
-          create: configs.map((c: any) => ({
-            fileType: c.fileType,
-            maxFiles: c.maxFiles || 1,
-          })),
-        },
+        category: category || null,
+        ...(configs && Array.isArray(configs) && configs.length > 0 && {
+          configs: {
+            create: configs.map((c: any) => ({
+              fileType: c.fileType,
+              maxFiles: c.maxFiles || 1,
+            })),
+          },
+        }),
         options: {
           create: finalOptions.map((opt: any) => ({
             label: opt.label,
@@ -285,7 +294,7 @@ router.put("/:id", authMiddleware, async (req: AuthRequest, res) => {
     }
 
     const { id } = req.params;
-    const { text, description, configs, order, isActive, cargoIds, frequencyType, frequencyDay, frequencyInterval, options, targetType, flow, selectors } = req.body;
+    const { text, description, configs, order, isActive, cargoIds, frequencyType, frequencyDay, frequencyInterval, options, targetType, flow, selectors, category } = req.body;
     console.log("PUT /api/questions/:id - Body received:", JSON.stringify(req.body, null, 2));
     const questionId = parseId(id);
 
@@ -342,12 +351,14 @@ router.put("/:id", authMiddleware, async (req: AuthRequest, res) => {
       data: {
         ...(text && { text }),
         ...(description !== undefined && { description }),
-        ...(order !== undefined && { order }),
+        // Only update order if explicitly provided with a valid positive value
+      ...(order !== undefined && parseInt(order, 10) > 0 && { order: parseInt(order, 10) }),
         ...(isActive !== undefined && { isActive }),
         ...(parsedFreqType !== undefined && { frequencyType: parsedFreqType }),
         ...(parsedFreqDay !== undefined && { frequencyDay: parsedFreqDay }),
         ...(parsedFreqInterval !== undefined && { frequencyInterval: parsedFreqInterval }),
         ...(parsedTarget !== undefined && { targetType: parsedTarget }),
+        ...(category !== undefined && { category: category || null }),
       },
       include: {
           configs: true,
@@ -540,6 +551,33 @@ router.put("/:id", authMiddleware, async (req: AuthRequest, res) => {
     console.error("Error al actualizar pregunta:", error);
     console.error("Error details:", error?.message);
     res.status(500).json({ error: "Error al actualizar pregunta", details: error?.message });
+  }
+});
+
+// POST /api/questions/bulk-assign-cargos - Asignar cargos en lote (admin)
+router.post("/bulk-assign-cargos", authMiddleware, async (req: AuthRequest, res) => {
+  try {
+    if (req.user?.roleId !== 1) {
+      return res.status(403).json({ error: "Solo admins" });
+    }
+    const { questionIds, cargoIds } = req.body;
+    if (!Array.isArray(questionIds) || !Array.isArray(cargoIds) || cargoIds.length === 0) {
+      return res.status(400).json({ error: "Debes enviar questionIds y cargoIds" });
+    }
+    let count = 0;
+    for (const qid of questionIds) {
+      for (const cid of cargoIds) {
+        await prisma.questionCargo.upsert({
+          where: { questionId_cargoId: { questionId: qid, cargoId: cid } },
+          create: { questionId: qid, cargoId: cid },
+          update: {},
+        });
+        count++;
+      }
+    }
+    res.json({ count, message: `${count} asignaciones creadas` });
+  } catch (error) {
+    res.status(500).json({ error: "Error al asignar cargos" });
   }
 });
 

@@ -78,8 +78,10 @@ router.get("/my-programs", authMiddleware, async (req: AuthRequest, res: Respons
 
     console.log("my-programs found:", userPrograms.length);
 
-    // Obtener campaña activa
-    const campaign = await prisma.campaign.findFirst({ where: { isActive: true } });
+    const now = new Date();
+    const campaign = await prisma.campaign.findFirst({
+      where: { isActive: true, startDate: { lte: now }, endDate: { gte: now } },
+    });
 
     // Para cada programa, obtener resumen de evaluación
     const programs = await Promise.all(
@@ -363,6 +365,7 @@ router.get("/:id/questions", authMiddleware, async (req: AuthRequest, res: Respo
     const questionPrograms = await prisma.questionProgram.findMany({
       where: { programId: parseId(req.params.id) },
       include: {
+        category: true,
         question: {
           include: {
             cargos: { include: { cargo: true } },
@@ -389,10 +392,18 @@ router.get("/:id/questions", authMiddleware, async (req: AuthRequest, res: Respo
           },
         },
       },
-      orderBy: { question: { order: "asc" } },
+      orderBy: [
+        { category: { order: "asc" } },
+        { question: { order: "asc" } },
+      ],
     });
 
-    res.json(questionPrograms.map(qp => ({ ...qp.question, assignedAt: qp.assignedAt })));
+    res.json(questionPrograms.map(qp => ({
+      ...qp.question,
+      assignedAt: qp.assignedAt,
+      categoryId: qp.categoryId,
+      category: qp.category,
+    })));
   } catch (error) {
     res.status(500).json({ error: "Error al obtener preguntas del programa" });
   }
@@ -422,7 +433,7 @@ router.post("/:id/create-question", authMiddleware, async (req: AuthRequest, res
     }
 
     const programId = parseId(req.params.id);
-    const { text, description, order, configs, options, frequencyType, frequencyDay, frequencyInterval, flow } = req.body;
+    const { text, description, order, configs, options, frequencyType, frequencyDay, frequencyInterval, flow, categoryId } = req.body;
 
     if (!text) {
       return res.status(400).json({ error: "El texto de la pregunta es requerido" });
@@ -478,7 +489,7 @@ router.post("/:id/create-question", authMiddleware, async (req: AuthRequest, res
       });
 
       await tx.questionProgram.create({
-        data: { questionId: q.id, programId },
+        data: { questionId: q.id, programId, categoryId: categoryId || null },
       });
 
       if (flow && typeof flow === "object" && flow.isActive) {
@@ -527,6 +538,68 @@ router.post("/:id/create-question", authMiddleware, async (req: AuthRequest, res
   } catch (error: any) {
     console.error("Error al crear pregunta del programa:", error);
     res.status(500).json({ error: error.message || "Error al crear pregunta" });
+  }
+});
+
+// ==================== CATEGORÍAS DE PREGUNTAS POR PROGRAMA ====================
+
+router.get("/:id/categories", authMiddleware, async (req: AuthRequest, res: Response) => {
+  try {
+    const categories = await prisma.questionCategory.findMany({
+      where: { programId: parseId(req.params.id) },
+      orderBy: { order: "asc" },
+      include: { _count: { select: { questions: true } } },
+    });
+    res.json(categories);
+  } catch (error) {
+    res.status(500).json({ error: "Error al obtener categorías" });
+  }
+});
+
+router.post("/:id/categories", authMiddleware, async (req: AuthRequest, res: Response) => {
+  try {
+    if (req.user?.roleId !== 1) return res.status(403).json({ error: "Solo admins" });
+    const programId = parseId(req.params.id);
+    const { name } = req.body;
+    if (!name?.trim()) return res.status(400).json({ error: "Nombre requerido" });
+
+    const count = await prisma.questionCategory.count({ where: { programId } });
+    const category = await prisma.questionCategory.create({
+      data: { name: name.trim(), programId, order: count },
+    });
+    res.status(201).json(category);
+  } catch (error: any) {
+    if (error.code === "P2002") return res.status(400).json({ error: "Ya existe una categoría con ese nombre" });
+    res.status(500).json({ error: "Error al crear categoría" });
+  }
+});
+
+router.put("/:id/categories/:categoryId", authMiddleware, async (req: AuthRequest, res: Response) => {
+  try {
+    if (req.user?.roleId !== 1) return res.status(403).json({ error: "Solo admins" });
+    const { name, order } = req.body;
+    const data: any = {};
+    if (name?.trim()) data.name = name.trim();
+    if (order !== undefined) data.order = parseInt(String(order), 10);
+    const category = await prisma.questionCategory.update({
+      where: { id: parseId(req.params.categoryId) },
+      data,
+    });
+    res.json(category);
+  } catch (error) {
+    res.status(500).json({ error: "Error al actualizar categoría" });
+  }
+});
+
+router.delete("/:id/categories/:categoryId", authMiddleware, async (req: AuthRequest, res: Response) => {
+  try {
+    if (req.user?.roleId !== 1) return res.status(403).json({ error: "Solo admins" });
+    await prisma.questionCategory.delete({
+      where: { id: parseId(req.params.categoryId) },
+    });
+    res.json({ message: "Categoría eliminada" });
+  } catch (error) {
+    res.status(500).json({ error: "Error al eliminar categoría" });
   }
 });
 
