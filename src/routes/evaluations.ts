@@ -676,6 +676,9 @@ router.get("/progress", authMiddleware, async (req: AuthRequest, res) => {
     const { campaignId } = req.query;
     const now = new Date();
 
+    const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    const todayEnd = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59, 999);
+
     let campaign;
     if (campaignId) {
       campaign = await prisma.campaign.findUnique({
@@ -683,9 +686,15 @@ router.get("/progress", authMiddleware, async (req: AuthRequest, res) => {
       });
     } else {
       campaign = await prisma.campaign.findFirst({
-        where: { isActive: true, startDate: { lte: now }, endDate: { gte: now } },
+        where: { isActive: true, startDate: { lte: todayEnd }, endDate: { gte: today } },
         orderBy: { startDate: "desc" },
       });
+      if (!campaign) {
+        campaign = await prisma.campaign.findFirst({
+          where: { isActive: true },
+          orderBy: { startDate: "desc" },
+        });
+      }
     }
 
     if (!campaign) {
@@ -730,8 +739,8 @@ router.get("/progress", authMiddleware, async (req: AuthRequest, res) => {
 
         console.log(`DEBUG /progress - user ${au.userId}: cargoId=${userCargoId}`);
 
-        // Solo contar preguntas que tienen cargo(s) asignados Y coinciden con el cargo del usuario
         const relevantQuestions = allQuestions.filter((q) => {
+          if (q.cargos.length === 0) return true; // sin cargo = visible para todos
           return q.cargos.some((qc) => qc.cargoId === userCargoId);
         });
 

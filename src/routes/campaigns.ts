@@ -208,6 +208,7 @@ router.get("/my-assigned", authMiddleware, async (req: AuthRequest, res) => {
   try {
     const userId = req.user!.id;
     const now = new Date();
+    const todayStr = new Date().toLocaleDateString("en-CA");
 
     const assignments = await prisma.campaignUser.findMany({
       where: { userId },
@@ -221,12 +222,12 @@ router.get("/my-assigned", authMiddleware, async (req: AuthRequest, res) => {
 
     const result = assignments.map(a => {
       const c = a.campaign;
-      const start = new Date(c.startDate);
-      const end = new Date(c.endDate);
+      const startStr = new Date(c.startDate).toLocaleDateString("en-CA");
+      const endStr = new Date(c.endDate).toLocaleDateString("en-CA");
       let status: string;
       if (!c.isActive) status = "inactivo";
-      else if (now < start) status = "proximamente";
-      else if (now > end) status = "cerrado";
+      else if (todayStr < startStr) status = "proximamente";
+      else if (todayStr > endStr) status = "cerrado";
       else status = "activo";
 
       return {
