@@ -19,6 +19,14 @@ router.post("/", authMiddleware, async (req: AuthRequest, res: Response) => {
       return res.status(400).json({ error: "Email y password son requeridos" });
     }
 
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      return res.status(400).json({ error: "Formato de email inválido" });
+    }
+
+    if (password.length < 6) {
+      return res.status(400).json({ error: "La contraseña debe tener al menos 6 caracteres" });
+    }
+
     const existingUser = await prisma.user.findUnique({ where: { email } });
     if (existingUser) {
       return res.status(400).json({ error: "El email ya está registrado" });

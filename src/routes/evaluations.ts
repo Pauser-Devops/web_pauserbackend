@@ -84,6 +84,14 @@ router.post("/submit", authMiddleware, async (req: AuthRequest, res) => {
       return res.status(400).json({ error: "Campaña no encontrada" });
     }
 
+    // Get user's sede and unidad for group sharing
+    const userData = await prisma.user.findUnique({
+      where: { id: userId },
+      select: { sedeId: true, unidadId: true },
+    });
+    const userSedeId = userData?.sedeId;
+    const userUnidadId = userData?.unidadId;
+
     // Get questions: campaign-scoped if assigned, otherwise global active
     const userCargoId = req.user!.cargoId;
 
@@ -107,6 +115,7 @@ router.post("/submit", authMiddleware, async (req: AuthRequest, res) => {
     });
 
     const relevantQuestions = allQuestions.filter((q) => {
+      if (q.cargos.length === 0) return true; // sin cargo = visible para todos
       return q.cargos.some((qc) => qc.cargoId === userCargoId);
     });
 
@@ -1363,7 +1372,13 @@ router.get("/question-availability", authMiddleware, async (req: AuthRequest, re
   try {
     const { programId, source = "EXCELENCIA" } = req.query;
     const userId = req.user!.id;
-    
+    const userRecord = await prisma.user.findUnique({
+      where: { id: userId },
+      select: { sedeId: true, unidadId: true },
+    });
+    const userSedeId = userRecord?.sedeId;
+    const userUnidadId = userRecord?.unidadId;
+
     const now = new Date();
     const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
     const todayEnd = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59, 999);
@@ -1375,7 +1390,78 @@ router.get("/question-availability", authMiddleware, async (req: AuthRequest, re
         endDate: { gte: today },
       },
     });
-    if (!campaign) return res.json({ questions: [], message: "No hay campaña activa" });
+    if (!campaign) {
+      // No active campaign. Check for draft evaluations in closed campaign → auto-submit
+      const draftEval = await prisma.evaluation.findFirst({
+        where: {
+          userId,
+          completedAt: null,
+          source: source as string,
+          answers: { some: {} },
+        },
+        include: { campaign: true, answers: { include: { option: { select: { score: true } }, question: { select: { id: true } } } } },
+        orderBy: { createdAt: "desc" },
+      });
+      if (draftEval) {
+        const isCampaignClosed = !draftEval.campaign.isActive || new Date() > new Date(draftEval.campaign.endDate);
+        if (isCampaignClosed) {
+          // Recalculate scores using current question options to ensure consistency
+          const campaignQuestions = await prisma.campaignQuestion.findMany({
+            where: { campaignId: draftEval.campaignId },
+            select: { questionId: true },
+          });
+          const campaignQuestionIds = campaignQuestions.map(cq => cq.questionId);
+
+          const allQuestions = await prisma.question.findMany({
+            where: {
+              isActive: true,
+              ...(campaignQuestionIds.length > 0 && { id: { in: campaignQuestionIds } }),
+            },
+            include: { cargos: true, options: true },
+          });
+
+          const userData = await prisma.user.findUnique({ where: { id: userId }, select: { cargoId: true } });
+          const relevantQuestions = allQuestions.filter((q) => {
+            if (q.cargos.length === 0) return true;
+            return q.cargos.some((qc) => qc.cargoId === userData?.cargoId);
+          });
+
+          const currentMaxScore = relevantQuestions.reduce((sum, q) => {
+            return sum + (q.options?.length > 0 ? Math.max(...q.options.map(o => o.score || 0)) : 0);
+          }, 0);
+
+          // Recalculate totalScore from draft answers using current option scores
+          const totalScore = draftEval.answers.reduce((s, a) => {
+            const question = relevantQuestions.find(q => q.id === a.questionId);
+            if (!question) return s;
+            const option = question.options?.find(o => o.id === a.optionId);
+            return s + (option?.score || a.awardedScore || 0);
+          }, 0);
+
+          await prisma.evaluation.update({
+            where: { id: draftEval.id },
+            data: { completedAt: new Date(), totalScore, maxScore: currentMaxScore },
+          });
+          return res.json({
+            questions: [],
+            autoSubmitted: true,
+            evaluation: { id: draftEval.id, totalScore, maxScore: currentMaxScore, completedAt: new Date().toISOString() },
+            message: "La campaña ha cerrado. Tu evaluación fue enviada automáticamente con los puntajes acumulados.",
+          });
+        }
+      }
+      return res.json({ questions: [], message: "No hay campaña activa" });
+    }
+
+    // Find group members (same sede + unidad)
+    let groupUserIds: number[] = [userId];
+    if (userSedeId && userUnidadId) {
+      const groupUsers = await prisma.user.findMany({
+        where: { sedeId: userSedeId, unidadId: userUnidadId, id: { not: userId } },
+        select: { id: true, name: true },
+      });
+      groupUserIds = [userId, ...groupUsers.map(u => u.id)];
+    }
 
     // Obtener preguntas según source
     let questionIds: number[] = [];
@@ -1394,7 +1480,7 @@ router.get("/question-availability", authMiddleware, async (req: AuthRequest, re
       });
       const campaignQuestionIds = campaignQuestions.map(cq => cq.questionId);
 
-      const questions = await prisma.question.findMany({
+      const questionsWithCargo = await prisma.question.findMany({
         where: {
           cargos: { some: { cargoId: userCargoId || 0 } },
           targetType: { in: ["EXCELENCIA", "AMBOS"] },
@@ -1403,7 +1489,16 @@ router.get("/question-availability", authMiddleware, async (req: AuthRequest, re
         },
         select: { id: true },
       });
-      questionIds = questions.map(q => q.id);
+      const questionsWithoutCargo = await prisma.question.findMany({
+        where: {
+          cargos: { none: {} },
+          targetType: { in: ["EXCELENCIA", "AMBOS"] },
+          isActive: true,
+          ...(campaignQuestionIds.length > 0 && { id: { in: campaignQuestionIds } }),
+        },
+        select: { id: true },
+      });
+      questionIds = [...new Set([...questionsWithCargo.map(q => q.id), ...questionsWithoutCargo.map(q => q.id)])];
     }
 
     const questions = await prisma.question.findMany({
@@ -1411,13 +1506,37 @@ router.get("/question-availability", authMiddleware, async (req: AuthRequest, re
       include: { options: { orderBy: { label: "asc" } }, configs: true, selectors: { include: { options: { orderBy: { order: "asc" } } }, orderBy: { order: "asc" } } },
     });
 
+    // Get submissions from ALL group members
     const submissions = await prisma.questionSubmission.findMany({
-      where: { userId, campaignId: campaign.id, questionId: { in: questionIds } },
+      where: { userId: { in: groupUserIds }, campaignId: campaign.id, questionId: { in: questionIds } },
       orderBy: { periodStart: "desc" },
+    });
+
+    // Get answers from group members (both submitted and drafts)
+    const groupAnswers = await prisma.answer.findMany({
+      where: {
+        questionId: { in: questionIds },
+        evaluation: { campaignId: campaign.id, userId: { in: groupUserIds } },
+      },
+      include: {
+        evaluation: {
+          select: {
+            userId: true,
+            completedAt: true,
+            user: { select: { name: true, sede: { select: { name: true } }, unidadNegocio: { select: { name: true } } } },
+          },
+        },
+        option: { select: { id: true, label: true, text: true, score: true } },
+      },
     });
 
     const availability = questions.map(q => {
       const qSubmissions = submissions.filter(s => s.questionId === q.id);
+      const mySubmission = qSubmissions.find(s => s.userId === userId);
+      const groupSubmissions = qSubmissions.filter(s => s.userId !== userId);
+
+      // Check if any group member has answered this question
+      const groupAnswer = groupAnswers.find(a => a.questionId === q.id && a.evaluation.userId !== userId);
 
       if (q.frequencyType === "UNICA") {
         return { 
@@ -1425,6 +1544,18 @@ router.get("/question-availability", authMiddleware, async (req: AuthRequest, re
           available: qSubmissions.length === 0, 
           isComplete: qSubmissions.length > 0,
           currentPeriod: null,
+          answeredByMe: !!mySubmission,
+          completedByUser: groupAnswer ? {
+            userId: groupAnswer.evaluation.userId,
+            userName: groupAnswer.evaluation.user.name,
+            sede: groupAnswer.evaluation.user.sede?.name || null,
+            unidad: groupAnswer.evaluation.user.unidadNegocio?.name || null,
+            optionId: groupAnswer.option?.id,
+            optionLabel: groupAnswer.option?.label,
+            optionText: groupAnswer.option?.text,
+            score: groupAnswer.option?.score,
+            submitted: !!groupAnswer.evaluation.completedAt,
+          } : null,
         };
       }
 
@@ -1440,6 +1571,15 @@ router.get("/question-availability", authMiddleware, async (req: AuthRequest, re
         available: !answeredInPeriod,
         isComplete: answeredInPeriod,
         currentPeriod: { periodStart: periodStart.toISOString(), periodEnd: periodEnd.toISOString() },
+        answeredByMe: mySubmission != null,
+        completedByUser: groupSubmissions.length > 0 && !mySubmission ? {
+          userId: groupSubmissions[0].userId,
+          userName: null, // would need extra query
+          optionId: groupAnswer?.option?.id,
+          optionLabel: groupAnswer?.option?.label,
+          optionText: groupAnswer?.option?.text,
+          score: groupAnswer?.option?.score,
+        } : null,
       };
     });
 
@@ -1829,6 +1969,42 @@ router.post("/answer", authMiddleware, async (req: AuthRequest, res) => {
     }
 
     const progress = await recomputeEvaluationProgress(evaluation.id);
+
+    // Recalculate totalScore and maxScore
+    const allEvalAnswers = await prisma.answer.findMany({
+      where: { evaluationId: evaluation.id },
+      include: { option: { select: { score: true } }, question: { select: { id: true } } },
+    });
+
+    const campaignQIds = await prisma.campaignQuestion.findMany({
+      where: { campaignId },
+      select: { questionId: true },
+    });
+    const cqIds = campaignQIds.map(c => c.questionId);
+
+    const campaignQuestions = await prisma.question.findMany({
+      where: cqIds.length > 0 ? { id: { in: cqIds }, isActive: true } : { isActive: true },
+      include: { cargos: true, options: true },
+    });
+
+    const userData = await prisma.user.findUnique({ where: { id: userId }, select: { cargoId: true } });
+    const relevantQs = campaignQuestions.filter(q => {
+      if (q.cargos.length === 0) return true;
+      return q.cargos.some(qc => qc.cargoId === userData?.cargoId);
+    });
+
+    const newMaxScore = relevantQs.reduce((sum, q) => {
+      return sum + (q.options?.length > 0 ? Math.max(...q.options.map(o => o.score || 0)) : 0);
+    }, 0);
+
+    const newTotalScore = allEvalAnswers.reduce((sum, a) => {
+      return sum + (a.option?.score || a.awardedScore || 0);
+    }, 0);
+
+    await prisma.evaluation.update({
+      where: { id: evaluation.id },
+      data: { totalScore: newTotalScore, maxScore: newMaxScore },
+    });
 
     res.json({
       answer,

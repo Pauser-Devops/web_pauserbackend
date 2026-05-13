@@ -207,9 +207,9 @@ router.get("/active/assigned", authMiddleware, async (req: AuthRequest, res) => 
 router.get("/my-assigned", authMiddleware, async (req: AuthRequest, res) => {
   try {
     const userId = req.user!.id;
-    const now = new Date();
     const todayStr = new Date().toLocaleDateString("en-CA");
 
+    // Obtener campañas asignadas explícitamente
     const assignments = await prisma.campaignUser.findMany({
       where: { userId },
       include: {
@@ -220,8 +220,25 @@ router.get("/my-assigned", authMiddleware, async (req: AuthRequest, res) => {
       orderBy: { campaign: { startDate: "asc" } },
     });
 
-    const result = assignments.map(a => {
-      const c = a.campaign;
+    // Obtener campañas activas globales (sin asignaciones explícitas)
+    const globalCampaigns = await prisma.campaign.findMany({
+      where: { isActive: true },
+      include: { questions: { select: { questionId: true } } },
+      orderBy: { startDate: "asc" },
+    });
+
+    // Combinar y deduplicar
+    const campaignMap = new Map();
+    assignments.forEach(a => {
+      campaignMap.set(a.campaign.id, a.campaign);
+    });
+    globalCampaigns.forEach(c => {
+      if (!campaignMap.has(c.id)) {
+        campaignMap.set(c.id, c);
+      }
+    });
+
+    const result = Array.from(campaignMap.values()).map(c => {
       const startStr = new Date(c.startDate).toLocaleDateString("en-CA");
       const endStr = new Date(c.endDate).toLocaleDateString("en-CA");
       let status: string;

@@ -26,7 +26,7 @@ router.get("/monthly-comparison", authMiddleware, async (req: AuthRequest, res) 
     const evaluations = await prisma.evaluation.findMany({
       where: {
         userId: targetUserId,
-        createdAt: {
+        completedAt: {
           gte: startDate,
           lte: endDate,
         },
@@ -53,6 +53,40 @@ router.get("/monthly-comparison", authMiddleware, async (req: AuthRequest, res) 
     const excelenciaEval = evaluations.find(e => e.source === "EXCELENCIA");
     const misProgramasEval = evaluations.find(e => e.source === "MIS_PROGRAMAS");
 
+    // Helper: recalculate maxScore based on current questions for user's cargo
+    const recalcMaxScore = async (evaluation: typeof excelenciaEval) => {
+      if (!evaluation) return 0;
+      const campaignId = evaluation.campaignId;
+      const campaignQuestions = await prisma.campaignQuestion.findMany({
+        where: { campaignId },
+        select: { questionId: true },
+      });
+      const campaignQuestionIds = campaignQuestions.map(cq => cq.questionId);
+
+      const allQuestions = await prisma.question.findMany({
+        where: {
+          isActive: true,
+          ...(campaignQuestionIds.length > 0 && { id: { in: campaignQuestionIds } }),
+        },
+        include: { cargos: true, options: true },
+      });
+
+      const userData = await prisma.user.findUnique({ where: { id: targetUserId }, select: { cargoId: true } });
+      const relevantQuestions = allQuestions.filter((q) => {
+        if (q.cargos.length === 0) return true;
+        return q.cargos.some((qc) => qc.cargoId === userData?.cargoId);
+      });
+
+      return relevantQuestions.reduce((sum, q) => {
+        return sum + (q.options?.length > 0 ? Math.max(...q.options.map(o => o.score || 0)) : 0);
+      }, 0);
+    };
+
+    const [excelenciaMaxScore, misProgramasMaxScore] = await Promise.all([
+      recalcMaxScore(excelenciaEval),
+      recalcMaxScore(misProgramasEval),
+    ]);
+
     // Obtener detalle por pregunta
     const getQuestionDetails = (evaluation: typeof excelenciaEval) => {
       if (!evaluation) return [];
@@ -76,15 +110,16 @@ router.get("/monthly-comparison", authMiddleware, async (req: AuthRequest, res) 
 
     const monthlyHistory = await prisma.$queryRaw`
       SELECT
-        DATE_TRUNC('month', "createdAt") as month,
+        DATE_TRUNC('month', "completedAt") as month,
         source,
         AVG("totalScore") as avg_score,
         AVG("maxScore") as max_score,
         COUNT(*) as count
       FROM "Evaluation"
       WHERE "userId" = ${targetUserId}
-        AND "createdAt" >= ${sixMonthsAgo}
-      GROUP BY DATE_TRUNC('month', "createdAt"), source
+        AND "completedAt" IS NOT NULL
+        AND "completedAt" >= ${sixMonthsAgo}
+      GROUP BY DATE_TRUNC('month', "completedAt"), source
       ORDER BY month ASC
     `;
 
@@ -95,52 +130,56 @@ router.get("/monthly-comparison", authMiddleware, async (req: AuthRequest, res) 
       max_score: typeof row.max_score === 'bigint' ? Number(row.max_score) : Number(row.max_score || 0),
     }));
 
-    // Estadísticas por cargo (admin)
+    // Estadísticas por cargo (admin ve todos, user ve solo su cargo como benchmark)
+    const targetUser = await prisma.user.findUnique({
+      where: { id: targetUserId },
+      select: { cargoId: true, cargo: { select: { name: true } } },
+    });
+
     let cargoStats = null;
-    if (isAdmin) {
-      const allEvaluations = await prisma.evaluation.findMany({
-        where: {
-          createdAt: {
-            gte: startDate,
-            lte: endDate,
+    const allEvaluations = await prisma.evaluation.findMany({
+      where: {
+        completedAt: {
+          gte: startDate,
+          lte: endDate,
+        },
+        ...(isAdmin ? {} : { user: { cargoId: targetUser?.cargoId || undefined } }),
+      },
+      include: {
+        user: {
+          select: {
+            id: true,
+            name: true,
+            cargo: { select: { name: true } },
           },
         },
-        include: {
-          user: {
-            select: {
-              id: true,
-              name: true,
-              cargo: { select: { name: true } },
-            },
-          },
-        },
-      });
+      },
+    });
 
-      const cargoMap: Record<string, { excelencia: number[], misProgramas: number[] }> = {};
-      allEvaluations.forEach(e => {
-        const cargoName = e.user.cargo?.name || "Sin cargo";
-        if (!cargoMap[cargoName]) {
-          cargoMap[cargoName] = { excelencia: [], misProgramas: [] };
-        }
-        if (e.source === "EXCELENCIA") {
-          cargoMap[cargoName].excelencia.push(e.totalScore);
-        } else if (e.source === "MIS_PROGRAMAS") {
-          cargoMap[cargoName].misProgramas.push(e.totalScore);
-        }
-      });
+    const cargoMap: Record<string, { excelencia: number[], misProgramas: number[] }> = {};
+    allEvaluations.forEach(e => {
+      const cargoName = e.user.cargo?.name || "Sin cargo";
+      if (!cargoMap[cargoName]) {
+        cargoMap[cargoName] = { excelencia: [], misProgramas: [] };
+      }
+      if (e.source === "EXCELENCIA") {
+        cargoMap[cargoName].excelencia.push(e.totalScore);
+      } else if (e.source === "MIS_PROGRAMAS") {
+        cargoMap[cargoName].misProgramas.push(e.totalScore);
+      }
+    });
 
-      cargoStats = Object.entries(cargoMap).map(([cargo, scores]) => ({
-        cargo,
-        excelencia: {
-          count: scores.excelencia.length,
-          avg: scores.excelencia.length > 0 ? Math.round(scores.excelencia.reduce((a, b) => a + b, 0) / scores.excelencia.length) : 0,
-        },
-        misProgramas: {
-          count: scores.misProgramas.length,
-          avg: scores.misProgramas.length > 0 ? Math.round(scores.misProgramas.reduce((a, b) => a + b, 0) / scores.misProgramas.length) : 0,
-        },
-      }));
-    }
+    cargoStats = Object.entries(cargoMap).map(([cargo, scores]) => ({
+      cargo,
+      excelencia: {
+        count: scores.excelencia.length,
+        avg: scores.excelencia.length > 0 ? Math.round(scores.excelencia.reduce((a, b) => a + b, 0) / scores.excelencia.length) : 0,
+      },
+      misProgramas: {
+        count: scores.misProgramas.length,
+        avg: scores.misProgramas.length > 0 ? Math.round(scores.misProgramas.reduce((a, b) => a + b, 0) / scores.misProgramas.length) : 0,
+      },
+    }));
 
     res.json({
       month,
@@ -151,15 +190,15 @@ router.get("/monthly-comparison", authMiddleware, async (req: AuthRequest, res) 
       current: {
         excelencia: excelenciaEval ? {
           totalScore: excelenciaEval.totalScore,
-          maxScore: excelenciaEval.maxScore,
-          percentage: excelenciaEval.maxScore > 0 ? Math.round((excelenciaEval.totalScore / excelenciaEval.maxScore) * 100) : 0,
+          maxScore: excelenciaMaxScore,
+          percentage: excelenciaMaxScore > 0 ? Math.round((excelenciaEval.totalScore / excelenciaMaxScore) * 100) : 0,
           completedAt: excelenciaEval.completedAt,
           questions: getQuestionDetails(excelenciaEval),
         } : null,
         misProgramas: misProgramasEval ? {
           totalScore: misProgramasEval.totalScore,
-          maxScore: misProgramasEval.maxScore,
-          percentage: misProgramasEval.maxScore > 0 ? Math.round((misProgramasEval.totalScore / misProgramasEval.maxScore) * 100) : 0,
+          maxScore: misProgramasMaxScore,
+          percentage: misProgramasMaxScore > 0 ? Math.round((misProgramasEval.totalScore / misProgramasMaxScore) * 100) : 0,
           completedAt: misProgramasEval.completedAt,
           questions: getQuestionDetails(misProgramasEval),
         } : null,
