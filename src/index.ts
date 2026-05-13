@@ -18,13 +18,25 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 app.use(cors({
-  origin: [
-    "http://localhost:5173", 
-    "http://localhost:5174", 
-    "http://127.0.0.1:5173",
-    "https://pauserdistribucionessac.com",
-    process.env.FRONTEND_URL || ""
-  ].filter(Boolean),
+  origin: function (origin, callback) {
+    if (!origin) return callback(null, true);
+    const allowedOrigins = [
+      "http://localhost:5173", 
+      "http://localhost:5174", 
+      "http://127.0.0.1:5173",
+      "https://pauserdistribucionessac.com",
+      "https://www.pauserdistribucionessac.com"
+    ];
+    if (process.env.FRONTEND_URL) allowedOrigins.push(process.env.FRONTEND_URL);
+    
+    // Check exact match or any subdomain of pauserdistribucionessac.com
+    if (allowedOrigins.includes(origin) || origin.endsWith(".pauserdistribucionessac.com")) {
+      callback(null, true);
+    } else {
+      console.error(`CORS blocked request from origin: ${origin}`);
+      callback(null, false); // Return false instead of Error to avoid crashing
+    }
+  },
   credentials: true,
 }));
 
