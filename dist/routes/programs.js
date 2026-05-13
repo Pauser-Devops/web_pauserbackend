@@ -1,0 +1,561 @@
+"use strict";
+Object.defineProperty(exports, "__esModule", { value: true });
+const express_1 = require("express");
+const prisma_ts_1 = require("../lib/prisma.ts");
+const auth_ts_1 = require("../middleware/auth.ts");
+console.log(">>> programs.ts loaded");
+const router = (0, express_1.Router)();
+const parseId = (id) => parseInt(id);
+// ==================== LISTAR PROGRAMAS ====================
+router.get("/", auth_ts_1.authMiddleware, async (_req, res) => {
+    try {
+        const programs = await prisma_ts_1.prisma.program.findMany({
+            include: {
+                _count: {
+                    select: { users: true, questions: true },
+                },
+            },
+            orderBy: { createdAt: "desc" },
+        });
+        res.json(programs);
+    }
+    catch (error) {
+        console.error("Error al listar programas:", error);
+        res.status(500).json({ error: "Error al listar programas" });
+    }
+});
+// ==================== OBTENER PROGRAMAS DEL USUARIO LOGUEADO ====================
+// IMPORTANTE: Debe estar ANTES de /:id para que Express no interprete "my-programs" como un :id
+router.get("/my-programs", auth_ts_1.authMiddleware, async (req, res) => {
+    try {
+        const userId = req.user?.id;
+        console.log("my-programs userId:", userId);
+        if (!userId) {
+            return res.status(401).json({ error: "Usuario no identificado" });
+        }
+        const userPrograms = await prisma_ts_1.prisma.userProgram.findMany({
+            where: { userId },
+            include: {
+                program: {
+                    include: {
+                        questions: {
+                            include: {
+                                question: {
+                                    include: {
+                                        options: { orderBy: { label: "asc" } },
+                                        configs: true,
+                                        cargos: { include: { cargo: { select: { id: true, name: true } } } },
+                                        selectors: {
+                                            include: { options: { orderBy: { order: "asc" } } },
+                                            orderBy: { order: "asc" },
+                                        },
+                                        flowConfig: {
+                                            include: {
+                                                approvalCargo: true,
+                                                triggers: {
+                                                    include: {
+                                                        triggerOption: true,
+                                                        triggerSelector: {
+                                                            include: { options: { orderBy: { order: "asc" } } },
+                                                        },
+                                                        delegateCargo: true,
+                                                    },
+                                                },
+                                            },
+                                        },
+                                    },
+                                },
+                            },
+                        },
+                    },
+                },
+            },
+        });
+        console.log("my-programs found:", userPrograms.length);
+        const now = new Date();
+        const campaign = await prisma_ts_1.prisma.campaign.findFirst({
+            where: { isActive: true, startDate: { lte: now }, endDate: { gte: now } },
+        });
+        // Para cada programa, obtener resumen de evaluación
+        const programs = await Promise.all(userPrograms.map(async (up) => {
+            let evaluationSummary = null;
+            if (campaign) {
+                const evaluation = await prisma_ts_1.prisma.evaluation.findFirst({
+                    where: {
+                        userId,
+                        campaignId: campaign.id,
+                        source: "MIS_PROGRAMAS",
+                        programId: up.program.id
+                    },
+                    include: { answers: { select: { awardedScore: true, adminScore: true, periodStart: true } } },
+                });
+                if (evaluation) {
+                    const totalAuto = evaluation.answers.reduce((sum, a) => sum + (a.awardedScore || 0), 0);
+                    const totalAdmin = evaluation.answers.reduce((sum, a) => sum + (a.adminScore || 0), 0);
+                    const hasAdminReview = evaluation.answers.some(a => a.adminScore !== null);
+                    const periodsCount = new Set(evaluation.answers.map(a => a.periodStart?.toISOString()).filter(Boolean)).size;
+                    evaluationSummary = {
+                        id: evaluation.id,
+                        totalScore: totalAuto,
+                        totalAdminScore: hasAdminReview ? totalAdmin : null,
+                        maxScore: evaluation.maxScore,
+                        completedAt: evaluation.completedAt,
+                        periodsAnswered: periodsCount,
+                    };
+                }
+            }
+            return {
+                id: up.program.id,
+                name: up.program.name,
+                description: up.program.description,
+                assignedAt: up.assignedAt,
+                questions: up.program.questions.map(qp => qp.question),
+                evaluation: evaluationSummary,
+            };
+        }));
+        res.json(programs);
+    }
+    catch (error) {
+        console.error("Error my-programs:", error);
+        res.status(500).json({ error: error.message || "Error al obtener tus programas" });
+    }
+});
+// ==================== OBTENER PROGRAMA POR ID ====================
+router.get("/:id", auth_ts_1.authMiddleware, async (req, res) => {
+    try {
+        const program = await prisma_ts_1.prisma.program.findUnique({
+            where: { id: parseId(req.params.id) },
+            include: {
+                users: {
+                    include: {
+                        user: {
+                            select: { id: true, email: true, name: true, sede: true, unidadNegocio: true, cargo: true },
+                        },
+                    },
+                },
+                questions: {
+                    include: {
+                        question: { select: { id: true, text: true, order: true } },
+                    },
+                },
+            },
+        });
+        if (!program) {
+            return res.status(404).json({ error: "Programa no encontrado" });
+        }
+        res.json(program);
+    }
+    catch (error) {
+        res.status(500).json({ error: "Error al obtener programa" });
+    }
+});
+// ==================== CREAR PROGRAMA ====================
+router.post("/", auth_ts_1.authMiddleware, async (req, res) => {
+    try {
+        if (req.user?.roleId !== 1) {
+            return res.status(403).json({ error: "Solo admins pueden crear programas" });
+        }
+        const { name, description } = req.body;
+        if (!name) {
+            return res.status(400).json({ error: "El nombre es requerido" });
+        }
+        const existing = await prisma_ts_1.prisma.program.findUnique({ where: { name } });
+        if (existing) {
+            return res.status(400).json({ error: "Ya existe un programa con ese nombre" });
+        }
+        const program = await prisma_ts_1.prisma.program.create({
+            data: { name, description },
+        });
+        res.status(201).json({ message: "Programa creado exitosamente", program });
+    }
+    catch (error) {
+        console.error("Error al crear programa:", error);
+        res.status(500).json({ error: "Error al crear programa" });
+    }
+});
+// ==================== ACTUALIZAR PROGRAMA ====================
+router.put("/:id", auth_ts_1.authMiddleware, async (req, res) => {
+    try {
+        if (req.user?.roleId !== 1) {
+            return res.status(403).json({ error: "Solo admins pueden editar programas" });
+        }
+        const { name, description, isActive } = req.body;
+        const existing = await prisma_ts_1.prisma.program.findUnique({ where: { id: parseId(req.params.id) } });
+        if (!existing) {
+            return res.status(404).json({ error: "Programa no encontrado" });
+        }
+        const program = await prisma_ts_1.prisma.program.update({
+            where: { id: parseId(req.params.id) },
+            data: {
+                ...(name && { name }),
+                ...(description !== undefined && { description }),
+                ...(isActive !== undefined && { isActive }),
+            },
+        });
+        res.json({ message: "Programa actualizado exitosamente", program });
+    }
+    catch (error) {
+        if (error.code === "P2002") {
+            return res.status(400).json({ error: "Ya existe un programa con ese nombre" });
+        }
+        res.status(500).json({ error: "Error al actualizar programa" });
+    }
+});
+// ==================== ELIMINAR PROGRAMA ====================
+router.delete("/:id", auth_ts_1.authMiddleware, async (req, res) => {
+    try {
+        if (req.user?.roleId !== 1) {
+            return res.status(403).json({ error: "Solo admins pueden eliminar programas" });
+        }
+        const existing = await prisma_ts_1.prisma.program.findUnique({ where: { id: parseId(req.params.id) } });
+        if (!existing) {
+            return res.status(404).json({ error: "Programa no encontrado" });
+        }
+        await prisma_ts_1.prisma.program.delete({ where: { id: parseId(req.params.id) } });
+        res.json({ message: "Programa eliminado exitosamente" });
+    }
+    catch (error) {
+        res.status(500).json({ error: "Error al eliminar programa" });
+    }
+});
+// ==================== ASIGNAR USUARIOS A PROGRAMA ====================
+router.post("/:id/assign-users", auth_ts_1.authMiddleware, async (req, res) => {
+    try {
+        if (req.user?.roleId !== 1) {
+            return res.status(403).json({ error: "Solo admins pueden asignar usuarios" });
+        }
+        const { userIds, cargoId, sedeId, unidadId } = req.body;
+        const programId = parseId(req.params.id);
+        const program = await prisma_ts_1.prisma.program.findUnique({ where: { id: programId } });
+        if (!program) {
+            return res.status(404).json({ error: "Programa no encontrado" });
+        }
+        let users = [];
+        if (userIds && Array.isArray(userIds)) {
+            users = await prisma_ts_1.prisma.user.findMany({ where: { id: { in: userIds } } });
+        }
+        else if (cargoId || sedeId || unidadId) {
+            const where = {};
+            if (cargoId)
+                where.cargoId = cargoId;
+            if (sedeId)
+                where.sedeId = sedeId;
+            if (unidadId)
+                where.unidadId = unidadId;
+            users = await prisma_ts_1.prisma.user.findMany({ where, select: { id: true } });
+        }
+        else {
+            return res.status(400).json({ error: "Debe proporcionar userIds o filtros (cargoId, sedeId, unidadId)" });
+        }
+        const assignments = users.map(u => ({ userId: u.id, programId }));
+        await prisma_ts_1.prisma.userProgram.createMany({ data: assignments, skipDuplicates: true });
+        res.json({
+            message: `${users.length} usuario(s) asignados al programa ${program.name}`,
+            count: users.length,
+        });
+    }
+    catch (error) {
+        console.error("Error al asignar usuarios:", error);
+        res.status(500).json({ error: "Error al asignar usuarios" });
+    }
+});
+// ==================== REMOVER USUARIO DE PROGRAMA ====================
+router.delete("/:id/users/:userId", auth_ts_1.authMiddleware, async (req, res) => {
+    try {
+        if (req.user?.roleId !== 1) {
+            return res.status(403).json({ error: "Solo admins pueden remover usuarios" });
+        }
+        await prisma_ts_1.prisma.userProgram.deleteMany({
+            where: {
+                programId: parseId(req.params.id),
+                userId: parseId(req.params.userId),
+            },
+        });
+        res.json({ message: "Usuario removido del programa" });
+    }
+    catch (error) {
+        res.status(500).json({ error: "Error al remover usuario" });
+    }
+});
+// ==================== ASIGNAR PREGUNTAS A PROGRAMA ====================
+router.post("/:id/assign-questions", auth_ts_1.authMiddleware, async (req, res) => {
+    try {
+        if (req.user?.roleId !== 1) {
+            return res.status(403).json({ error: "Solo admins pueden asignar preguntas" });
+        }
+        const { questionIds } = req.body;
+        const programId = parseId(req.params.id);
+        if (!questionIds || !Array.isArray(questionIds)) {
+            return res.status(400).json({ error: "Debe proporcionar questionIds" });
+        }
+        const program = await prisma_ts_1.prisma.program.findUnique({ where: { id: programId } });
+        if (!program) {
+            return res.status(404).json({ error: "Programa no encontrado" });
+        }
+        const assignments = questionIds.map((qId) => ({ questionId: qId, programId }));
+        await prisma_ts_1.prisma.questionProgram.createMany({ data: assignments, skipDuplicates: true });
+        res.json({
+            message: `${questionIds.length} pregunta(s) asignadas al programa ${program.name}`,
+            count: questionIds.length,
+        });
+    }
+    catch (error) {
+        console.error("Error al asignar preguntas:", error);
+        res.status(500).json({ error: "Error al asignar preguntas" });
+    }
+});
+// ==================== REMOVER PREGUNTA DE PROGRAMA ====================
+router.delete("/:id/questions/:questionId", auth_ts_1.authMiddleware, async (req, res) => {
+    try {
+        if (req.user?.roleId !== 1) {
+            return res.status(403).json({ error: "Solo admins pueden remover preguntas" });
+        }
+        await prisma_ts_1.prisma.questionProgram.deleteMany({
+            where: {
+                programId: parseId(req.params.id),
+                questionId: parseId(req.params.questionId),
+            },
+        });
+        res.json({ message: "Pregunta removida del programa" });
+    }
+    catch (error) {
+        res.status(500).json({ error: "Error al remover pregunta" });
+    }
+});
+// ==================== OBTENER PREGUNTAS DE UN PROGRAMA ====================
+router.get("/:id/questions", auth_ts_1.authMiddleware, async (req, res) => {
+    try {
+        const questionPrograms = await prisma_ts_1.prisma.questionProgram.findMany({
+            where: { programId: parseId(req.params.id) },
+            include: {
+                category: true,
+                question: {
+                    include: {
+                        cargos: { include: { cargo: true } },
+                        options: { orderBy: { label: "asc" } },
+                        configs: true,
+                        selectors: {
+                            include: { options: { orderBy: { order: "asc" } } },
+                            orderBy: { order: "asc" },
+                        },
+                        flowConfig: {
+                            include: {
+                                approvalCargo: true,
+                                triggers: {
+                                    include: {
+                                        triggerOption: true,
+                                        triggerSelector: {
+                                            include: { options: { orderBy: { order: "asc" } } },
+                                        },
+                                        delegateCargo: true,
+                                    },
+                                },
+                            },
+                        },
+                    },
+                },
+            },
+            orderBy: [
+                { category: { order: "asc" } },
+                { question: { order: "asc" } },
+            ],
+        });
+        res.json(questionPrograms.map(qp => ({
+            ...qp.question,
+            assignedAt: qp.assignedAt,
+            categoryId: qp.categoryId,
+            category: qp.category,
+        })));
+    }
+    catch (error) {
+        res.status(500).json({ error: "Error al obtener preguntas del programa" });
+    }
+});
+// ==================== OBTENER USUARIOS DE UN PROGRAMA ====================
+router.get("/:id/users", auth_ts_1.authMiddleware, async (req, res) => {
+    try {
+        const userPrograms = await prisma_ts_1.prisma.userProgram.findMany({
+            where: { programId: parseId(req.params.id) },
+            include: {
+                user: { include: { role: true, sede: true, unidadNegocio: true, cargo: true } },
+            },
+        });
+        res.json(userPrograms.map(up => ({ ...up.user, assignedAt: up.assignedAt })));
+    }
+    catch (error) {
+        res.status(500).json({ error: "Error al obtener usuarios del programa" });
+    }
+});
+// ==================== CREAR PREGUNTA PARA PROGRAMA ====================
+router.post("/:id/create-question", auth_ts_1.authMiddleware, async (req, res) => {
+    try {
+        if (req.user?.roleId !== 1) {
+            return res.status(403).json({ error: "Solo admins pueden crear preguntas" });
+        }
+        const programId = parseId(req.params.id);
+        const { text, description, order, configs, options, frequencyType, frequencyDay, frequencyInterval, flow, categoryId } = req.body;
+        if (!text) {
+            return res.status(400).json({ error: "El texto de la pregunta es requerido" });
+        }
+        let finalOptions = options;
+        if (!finalOptions || !Array.isArray(finalOptions) || finalOptions.length === 0) {
+            return res.status(400).json({ error: "Debes agregar al menos una opción de respuesta" });
+        }
+        const program = await prisma_ts_1.prisma.program.findUnique({ where: { id: programId } });
+        if (!program) {
+            return res.status(404).json({ error: "Programa no encontrado" });
+        }
+        const validFreqTypes = ["UNICA", "DIARIA", "SEMANAL", "MENSUAL", "ANUAL", "DIA_ESPECIFICO"];
+        const parsedFreqType = frequencyType && validFreqTypes.includes(frequencyType) ? frequencyType : "UNICA";
+        const parsedFreqDay = frequencyDay != null ? parseInt(frequencyDay, 10) : null;
+        const parsedFreqInterval = frequencyInterval != null ? parseInt(frequencyInterval, 10) : null;
+        const parsedOrder = order !== undefined ? parseInt(order, 10) : 0;
+        const question = await prisma_ts_1.prisma.$transaction(async (tx) => {
+            const q = await tx.question.create({
+                data: {
+                    text,
+                    description: description || null,
+                    order: parsedOrder,
+                    targetType: "MIS_PROGRAMAS",
+                    frequencyType: parsedFreqType,
+                    frequencyDay: parsedFreqDay,
+                    frequencyInterval: parsedFreqInterval,
+                    configs: configs && configs.length > 0 ? {
+                        create: configs.map((c) => ({
+                            fileType: c.fileType,
+                            maxFiles: c.maxFiles || 1,
+                        })),
+                    } : undefined,
+                    options: {
+                        create: finalOptions.map((opt) => ({
+                            label: opt.label,
+                            text: opt.text,
+                            score: parseInt(opt.score, 10) || 0,
+                            isDefault: opt.isDefault || false,
+                            semanticKey: opt.semanticKey || null,
+                            isLocked: false,
+                        })),
+                    },
+                },
+                include: {
+                    configs: true,
+                    options: { orderBy: { label: "asc" } },
+                },
+            });
+            await tx.questionProgram.create({
+                data: { questionId: q.id, programId, categoryId: categoryId || null },
+            });
+            if (flow && typeof flow === "object" && flow.isActive) {
+                const flowConfigData = {
+                    questionId: q.id,
+                    isActive: flow.isActive !== false,
+                    requiresApproval: flow.requiresApproval || false,
+                    approvalCargoId: flow.approvalCargoId ? parseInt(String(flow.approvalCargoId), 10) : null,
+                    requiresDelegation: flow.requiresDelegation || false,
+                    deadlineOffsetDays: flow.deadlineOffsetDays || 2,
+                    deadlineBusinessDays: flow.deadlineBusinessDays || false,
+                };
+                const flowConfig = await tx.questionFlowConfig.create({
+                    data: flowConfigData,
+                });
+                if (flow.requiresDelegation && Array.isArray(flow.triggers) && flow.triggers.length > 0) {
+                    for (const trigger of flow.triggers) {
+                        if (trigger.delegateCargoId) {
+                            await tx.questionFlowTrigger.create({
+                                data: {
+                                    flowConfigId: flowConfig.id,
+                                    delegateCargoId: parseInt(String(trigger.delegateCargoId), 10),
+                                    triggerMode: trigger.triggerMode || "OPTION_SEMANTIC",
+                                    triggerSemanticKey: trigger.triggerSemanticKey || null,
+                                    triggerOptionId: trigger.triggerOptionId ? parseInt(String(trigger.triggerOptionId), 10) : null,
+                                    triggerScore: trigger.triggerScore != null ? parseInt(String(trigger.triggerScore), 10) : null,
+                                    secondFileType: trigger.secondFileType || "EXCEL",
+                                    secondFileMaxFiles: trigger.secondFileMaxFiles || 1,
+                                    secondFileLabel: trigger.secondFileLabel || "Plan de Acción",
+                                },
+                            });
+                        }
+                    }
+                }
+            }
+            return q;
+        });
+        res.status(201).json({
+            message: `Pregunta creada y asignada a ${program.name}`,
+            question,
+        });
+    }
+    catch (error) {
+        console.error("Error al crear pregunta del programa:", error);
+        res.status(500).json({ error: error.message || "Error al crear pregunta" });
+    }
+});
+// ==================== CATEGORÍAS DE PREGUNTAS POR PROGRAMA ====================
+router.get("/:id/categories", auth_ts_1.authMiddleware, async (req, res) => {
+    try {
+        const categories = await prisma_ts_1.prisma.questionCategory.findMany({
+            where: { programId: parseId(req.params.id) },
+            orderBy: { order: "asc" },
+            include: { _count: { select: { questions: true } } },
+        });
+        res.json(categories);
+    }
+    catch (error) {
+        res.status(500).json({ error: "Error al obtener categorías" });
+    }
+});
+router.post("/:id/categories", auth_ts_1.authMiddleware, async (req, res) => {
+    try {
+        if (req.user?.roleId !== 1)
+            return res.status(403).json({ error: "Solo admins" });
+        const programId = parseId(req.params.id);
+        const { name } = req.body;
+        if (!name?.trim())
+            return res.status(400).json({ error: "Nombre requerido" });
+        const count = await prisma_ts_1.prisma.questionCategory.count({ where: { programId } });
+        const category = await prisma_ts_1.prisma.questionCategory.create({
+            data: { name: name.trim(), programId, order: count },
+        });
+        res.status(201).json(category);
+    }
+    catch (error) {
+        if (error.code === "P2002")
+            return res.status(400).json({ error: "Ya existe una categoría con ese nombre" });
+        res.status(500).json({ error: "Error al crear categoría" });
+    }
+});
+router.put("/:id/categories/:categoryId", auth_ts_1.authMiddleware, async (req, res) => {
+    try {
+        if (req.user?.roleId !== 1)
+            return res.status(403).json({ error: "Solo admins" });
+        const { name, order } = req.body;
+        const data = {};
+        if (name?.trim())
+            data.name = name.trim();
+        if (order !== undefined)
+            data.order = parseInt(String(order), 10);
+        const category = await prisma_ts_1.prisma.questionCategory.update({
+            where: { id: parseId(req.params.categoryId) },
+            data,
+        });
+        res.json(category);
+    }
+    catch (error) {
+        res.status(500).json({ error: "Error al actualizar categoría" });
+    }
+});
+router.delete("/:id/categories/:categoryId", auth_ts_1.authMiddleware, async (req, res) => {
+    try {
+        if (req.user?.roleId !== 1)
+            return res.status(403).json({ error: "Solo admins" });
+        await prisma_ts_1.prisma.questionCategory.delete({
+            where: { id: parseId(req.params.categoryId) },
+        });
+        res.json({ message: "Categoría eliminada" });
+    }
+    catch (error) {
+        res.status(500).json({ error: "Error al eliminar categoría" });
+    }
+});
+exports.default = router;
+//# sourceMappingURL=programs.js.map
