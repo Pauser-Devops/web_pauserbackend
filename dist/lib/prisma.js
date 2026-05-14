@@ -11,6 +11,8 @@ const client_js_1 = require("../../generated/prisma/client.js");
 const { Pool } = pg_1.default;
 const pool = new Pool({
     connectionString: process.env.DATABASE_URL,
+    idleTimeoutMillis: 5000,
+    connectionTimeoutMillis: 15000,
 });
 const adapter = new adapter_pg_1.PrismaPg(pool);
 exports.prisma = new client_js_1.PrismaClient({ adapter });

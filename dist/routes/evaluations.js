@@ -129,7 +129,12 @@ router.post("/submit", auth_ts_1.authMiddleware, async (req, res) => {
             // First submission - create evaluation
             let totalScore = 0;
             const answersData = answers
-                .filter((a) => a?.questionId)
+                .filter((a) => {
+                // Skip questions without optionId AND without files (incomplete answers)
+                const hasOption = a.optionId != null && a.optionId !== '';
+                const hasFiles = a.files && Array.isArray(a.files) && a.files.length > 0;
+                return a?.questionId && (hasOption || hasFiles);
+            })
                 .map((a) => {
                 const hasFiles = a.files && Array.isArray(a.files) && a.files.length > 0;
                 const validFiles = hasFiles ? a.files.filter((f) => f && f.fileUrl) : [];
@@ -342,7 +347,11 @@ router.post("/submit", auth_ts_1.authMiddleware, async (req, res) => {
             for (const a of answers) {
                 if (!a?.questionId)
                     continue;
+                // Skip questions without optionId AND without files (incomplete answers)
+                const hasOption = a.optionId != null && a.optionId !== '';
                 const hasFiles = a.files && Array.isArray(a.files) && a.files.length > 0;
+                if (!hasOption && !hasFiles)
+                    continue;
                 const validFiles = hasFiles ? a.files.filter((f) => f && f.fileUrl) : [];
                 const question = relevantQuestions.find((q) => q.id === a.questionId);
                 const selectedOptionId = a.optionId ? parseInt(a.optionId) : null;
@@ -1396,7 +1405,7 @@ router.get("/question-availability", auth_ts_1.authMiddleware, async (req, res) 
                         optionId: groupAnswer.option?.id,
                         optionLabel: groupAnswer.option?.label,
                         optionText: groupAnswer.option?.text,
-                        score: groupAnswer.option?.score,
+                        score: groupAnswer.option?.score ?? groupAnswer.awardedScore ?? 0,
                         submitted: !!groupAnswer.evaluation.completedAt,
                     } : null,
                 };
@@ -1409,13 +1418,16 @@ router.get("/question-availability", auth_ts_1.authMiddleware, async (req, res) 
                 isComplete: answeredInPeriod,
                 currentPeriod: { periodStart: periodStart.toISOString(), periodEnd: periodEnd.toISOString() },
                 answeredByMe: mySubmission != null,
-                completedByUser: groupSubmissions.length > 0 && !mySubmission ? {
-                    userId: groupSubmissions[0].userId,
-                    userName: null, // would need extra query
-                    optionId: groupAnswer?.option?.id,
-                    optionLabel: groupAnswer?.option?.label,
-                    optionText: groupAnswer?.option?.text,
-                    score: groupAnswer?.option?.score,
+                completedByUser: groupAnswer ? {
+                    userId: groupAnswer.evaluation.userId,
+                    userName: groupAnswer.evaluation.user.name,
+                    sede: groupAnswer.evaluation.user.sede?.name || null,
+                    unidad: groupAnswer.evaluation.user.unidadNegocio?.name || null,
+                    optionId: groupAnswer.option?.id,
+                    optionLabel: groupAnswer.option?.label,
+                    optionText: groupAnswer.option?.text,
+                    score: groupAnswer.option?.score ?? groupAnswer.awardedScore ?? 0,
+                    submitted: !!groupAnswer.evaluation.completedAt,
                 } : null,
             };
         });
