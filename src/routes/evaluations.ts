@@ -1517,6 +1517,7 @@ router.get("/question-availability", authMiddleware, async (req: AuthRequest, re
       where: {
         questionId: { in: questionIds },
         evaluation: { campaignId: campaign.id, userId: { in: groupUserIds } },
+        optionId: { not: null },
       },
       include: {
         evaluation: {
@@ -1553,7 +1554,7 @@ router.get("/question-availability", authMiddleware, async (req: AuthRequest, re
             optionId: groupAnswer.option?.id,
             optionLabel: groupAnswer.option?.label,
             optionText: groupAnswer.option?.text,
-            score: groupAnswer.option?.score,
+            score: groupAnswer.option?.score ?? groupAnswer.awardedScore ?? 0,
             submitted: !!groupAnswer.evaluation.completedAt,
           } : null,
         };
@@ -1572,13 +1573,16 @@ router.get("/question-availability", authMiddleware, async (req: AuthRequest, re
         isComplete: answeredInPeriod,
         currentPeriod: { periodStart: periodStart.toISOString(), periodEnd: periodEnd.toISOString() },
         answeredByMe: mySubmission != null,
-        completedByUser: groupSubmissions.length > 0 && !mySubmission ? {
-          userId: groupSubmissions[0].userId,
-          userName: null, // would need extra query
-          optionId: groupAnswer?.option?.id,
-          optionLabel: groupAnswer?.option?.label,
-          optionText: groupAnswer?.option?.text,
-          score: groupAnswer?.option?.score,
+        completedByUser: groupAnswer ? {
+          userId: groupAnswer.evaluation.userId,
+          userName: groupAnswer.evaluation.user.name,
+          sede: groupAnswer.evaluation.user.sede?.name || null,
+          unidad: groupAnswer.evaluation.user.unidadNegocio?.name || null,
+          optionId: groupAnswer.option?.id,
+          optionLabel: groupAnswer.option?.label,
+          optionText: groupAnswer.option?.text,
+          score: groupAnswer.option?.score ?? groupAnswer.awardedScore ?? 0,
+          submitted: !!groupAnswer.evaluation.completedAt,
         } : null,
       };
     });

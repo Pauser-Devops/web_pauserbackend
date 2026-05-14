@@ -87,6 +87,18 @@ router.get("/monthly-comparison", authMiddleware, async (req: AuthRequest, res) 
       recalcMaxScore(misProgramasEval),
     ]);
 
+    // Helper: recalculate totalScore from answers using current option scores
+    const recalcTotalScore = (evaluation: typeof excelenciaEval) => {
+      if (!evaluation) return 0;
+      return evaluation.answers.reduce((sum, a) => {
+        const optionScore = a.option?.score ?? a.awardedScore ?? 0;
+        return sum + optionScore;
+      }, 0);
+    };
+
+    const excelenciaTotalScore = recalcTotalScore(excelenciaEval);
+    const misProgramasTotalScore = recalcTotalScore(misProgramasEval);
+
     // Obtener detalle por pregunta
     const getQuestionDetails = (evaluation: typeof excelenciaEval) => {
       if (!evaluation) return [];
@@ -189,22 +201,22 @@ router.get("/monthly-comparison", authMiddleware, async (req: AuthRequest, res) 
       },
       current: {
         excelencia: excelenciaEval ? {
-          totalScore: excelenciaEval.totalScore,
+          totalScore: excelenciaTotalScore,
           maxScore: excelenciaMaxScore,
-          percentage: excelenciaMaxScore > 0 ? Math.round((excelenciaEval.totalScore / excelenciaMaxScore) * 100) : 0,
+          percentage: excelenciaMaxScore > 0 ? Math.round((excelenciaTotalScore / excelenciaMaxScore) * 100) : 0,
           completedAt: excelenciaEval.completedAt,
           questions: getQuestionDetails(excelenciaEval),
         } : null,
         misProgramas: misProgramasEval ? {
-          totalScore: misProgramasEval.totalScore,
+          totalScore: misProgramasTotalScore,
           maxScore: misProgramasMaxScore,
-          percentage: misProgramasMaxScore > 0 ? Math.round((misProgramasEval.totalScore / misProgramasMaxScore) * 100) : 0,
+          percentage: misProgramasMaxScore > 0 ? Math.round((misProgramasTotalScore / misProgramasMaxScore) * 100) : 0,
           completedAt: misProgramasEval.completedAt,
           questions: getQuestionDetails(misProgramasEval),
         } : null,
       },
       difference: excelenciaEval && misProgramasEval
-        ? excelenciaEval.totalScore - misProgramasEval.totalScore
+        ? excelenciaTotalScore - misProgramasTotalScore
         : null,
       history: processedHistory,
       cargoStats,
