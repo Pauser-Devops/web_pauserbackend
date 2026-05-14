@@ -1525,7 +1525,6 @@ router.get("/question-availability", authMiddleware, async (req: AuthRequest, re
       where: {
         questionId: { in: questionIds },
         evaluation: { campaignId: campaign.id, userId: { in: groupUserIds } },
-        optionId: { not: null },
       },
       include: {
         evaluation: {
