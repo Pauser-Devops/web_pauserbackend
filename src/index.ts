@@ -72,6 +72,27 @@ app.get("/api/health", (req, res) => {
   res.json({ status: "ok", timestamp: new Date().toISOString() });
 });
 
+// Debug: verificar estado de la BD
+app.get("/api/test-db", async (req, res) => {
+  try {
+    const userCount = await prisma.user.count();
+    const roleCount = await prisma.role.count();
+    const tables = await prisma.$queryRaw`
+      SELECT table_name FROM information_schema.tables 
+      WHERE table_schema = 'public' AND table_type = 'BASE TABLE'
+    `;
+    res.json({
+      status: "connected",
+      database: process.env.DATABASE_URL?.split("@")[1]?.split("/")[0] || "unknown",
+      userCount,
+      roleCount,
+      tables: (tables as any[]).map(t => t.table_name),
+    });
+  } catch (error: any) {
+    res.status(500).json({ status: "error", message: error.message });
+  }
+});
+
 // Error handler global
 app.use((err: any, req: express.Request, res: express.Response, next: express.NextFunction) => {
   console.error("GLOBAL ERROR:", err);
