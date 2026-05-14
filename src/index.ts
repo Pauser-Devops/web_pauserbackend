@@ -12,6 +12,27 @@ import referencesRoutes from "./routes/references.ts";
 import programsRoutes from "./routes/programs.ts";
 import reportsRoutes from "./routes/reports.ts";
 import { authMiddleware } from "./middleware/auth.ts";
+import { expireDelegations } from "./jobs/expireDelegations.ts";
+import { autoSubmitDrafts } from "./jobs/autoSubmitDrafts.ts";
+
+const JOB_INTERVAL_MS = 60 * 60 * 1000; // 1 hour
+
+function startScheduledJobs() {
+  console.log("[scheduler] Starting scheduled jobs (interval: 1h)...");
+
+  // Run once on startup
+  expireDelegations().catch(err => console.error("[scheduler] expireDelegations startup error:", err));
+  autoSubmitDrafts().catch(err => console.error("[scheduler] autoSubmitDrafts startup error:", err));
+
+  // Schedule recurring runs
+  setInterval(() => {
+    expireDelegations().catch(err => console.error("[scheduler] expireDelegations error:", err));
+  }, JOB_INTERVAL_MS);
+
+  setInterval(() => {
+    autoSubmitDrafts().catch(err => console.error("[scheduler] autoSubmitDrafts error:", err));
+  }, JOB_INTERVAL_MS);
+}
 
 console.log(">>> Starting server...");
 
@@ -104,6 +125,7 @@ console.log(">>> About to listen...");
 
 app.listen(PORT, () => {
   console.log(`🚀 Servidor corriendo en http://localhost:${PORT}`);
+  startScheduledJobs();
 });
 
 export default app;
