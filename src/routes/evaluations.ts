@@ -1543,8 +1543,8 @@ router.get("/question-availability", authMiddleware, async (req: AuthRequest, re
       const mySubmission = qSubmissions.find(s => s.userId === userId);
       const groupSubmissions = qSubmissions.filter(s => s.userId !== userId);
 
-      // Check if any group member has answered this question
-      const groupAnswer = groupAnswers.find(a => a.questionId === q.id && a.evaluation.userId !== userId);
+      // Check if any group member has answered this question (with a valid optionId)
+      const groupAnswer = groupAnswers.find(a => a.questionId === q.id && a.evaluation.userId !== userId && a.optionId !== null);
 
       if (q.frequencyType === "UNICA") {
         return { 
