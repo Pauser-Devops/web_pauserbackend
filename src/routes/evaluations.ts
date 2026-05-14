@@ -140,7 +140,12 @@ router.post("/submit", authMiddleware, async (req: AuthRequest, res) => {
       // First submission - create evaluation
       let totalScore = 0;
       const answersData = answers
-        .filter((a: any) => a?.questionId)
+        .filter((a: any) => {
+          // Skip questions without optionId AND without files (incomplete answers)
+          const hasOption = a.optionId != null && a.optionId !== '';
+          const hasFiles = a.files && Array.isArray(a.files) && a.files.length > 0;
+          return a?.questionId && (hasOption || hasFiles);
+        })
         .map((a: any) => {
           const hasFiles = a.files && Array.isArray(a.files) && a.files.length > 0;
           const validFiles = hasFiles ? a.files.filter((f: any) => f && f.fileUrl) : [];
@@ -381,8 +386,11 @@ for (const ans of allAnswersUpdated1) {
       // Process each answer: upsert by [evaluationId, questionId, periodStart]
       for (const a of answers) {
         if (!a?.questionId) continue;
-
+        // Skip questions without optionId AND without files (incomplete answers)
+        const hasOption = a.optionId != null && a.optionId !== '';
         const hasFiles = a.files && Array.isArray(a.files) && a.files.length > 0;
+        if (!hasOption && !hasFiles) continue;
+
         const validFiles = hasFiles ? a.files.filter((f: any) => f && f.fileUrl) : [];
         const question = relevantQuestions.find((q) => q.id === a.questionId);
 
