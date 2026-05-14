@@ -1,6 +1,7 @@
 import "dotenv/config";
 import express from "express";
 import cors from "cors";
+import { prisma } from "./lib/prisma.ts";
 import authRoutes from "./routes/auth.ts";
 import usersRoutes from "./routes/users.ts";
 import questionsRoutes from "./routes/questions.ts";
