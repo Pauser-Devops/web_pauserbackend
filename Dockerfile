@@ -22,5 +22,5 @@ EXPOSE 3000
 # Set production environment
 ENV NODE_ENV=production
 
-# Start the server with tsx
-CMD ["npx", "tsx", "src/index.ts"]
+# Sync database schema and start the server
+CMD ["sh", "-c", "npx prisma db push --accept-data-loss && npx tsx src/index.ts"]
