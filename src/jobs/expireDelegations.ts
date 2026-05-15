@@ -1,7 +1,7 @@
 import { prisma } from "../lib/prisma.ts";
 
 export async function expireDelegations() {
-  console.log("[expireDelegations] Running...");
+
 
   try {
     const result = await prisma.answerDelegation.updateMany({
@@ -16,7 +16,6 @@ export async function expireDelegations() {
       },
     });
 
-    console.log(`[expireDelegations] Marked ${result.count} delegations as VENCIDO`);
     return result.count;
   } catch (error) {
     console.error("[expireDelegations] Error:", error);

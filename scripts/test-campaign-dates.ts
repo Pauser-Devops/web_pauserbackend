@@ -22,10 +22,33 @@ async function testCampaignDates() {
 
   const campaigns = await prisma.campaign.findMany({
     orderBy: { startDate: "asc" },
+    include: {
+      evaluations: {
+        include: { user: { select: { id: true, name: true, email: true } } },
+      },
+    },
   });
 
   console.log(`Total de campañas en BD: ${campaigns.length}`);
   console.log();
+
+  const MONTHS_ES = ["ene", "feb", "mar", "abr", "may", "jun", "jul", "ago", "sep", "oct", "nov", "dic"];
+  const MONTHS_FULL = ["enero", "febrero", "marzo", "abril", "mayo", "junio", "julio", "agosto", "septiembre", "octubre", "noviembre", "diciembre"];
+
+  const fmtCampaignDate = (iso: string) => {
+    const [y, m, d] = iso.slice(0, 10).split("-");
+    return `${parseInt(d)} ${MONTHS_ES[parseInt(m) - 1]}`;
+  };
+
+  const fmtTimestamp = (iso: string) => {
+    return new Date(iso).toLocaleDateString("es-ES", { day: "numeric", month: "short", year: "numeric" });
+  };
+
+  const fmtTimestampTime = (iso: string) => {
+    return new Date(iso).toLocaleTimeString("es-ES", { hour: "2-digit", minute: "2-digit" });
+  };
+
+  let allPassed = true;
 
   for (const c of campaigns) {
     console.log(`--- Campaña #${c.id}: "${c.name}" ---`);
@@ -35,27 +58,18 @@ async function testCampaignDates() {
     console.log(`    startDate: ${c.startDate.toISOString()}`);
     console.log(`    endDate:   ${c.endDate.toISOString()}`);
     
-    // 2. Lo que el backend procesa (toLocalDate convierte YYYY-MM-DD a Date local)
-    const startDateRaw = c.startDate.toISOString().slice(0, 10);
-    const endDateRaw = c.endDate.toISOString().slice(0, 10);
-    
-    console.log("  [BACKEND PROCESADO]");
-    console.log(`    startDate (ISO slice): ${startDateRaw}`);
-    console.log(`    endDate (ISO slice):   ${endDateRaw}`);
-    
-    // 3. Lo que el frontend debería mostrar (fmtCampaignDate extrae YYYY-MM-DD directo)
-    const [startY, startM, startD] = startDateRaw.split("-");
-    const [endY, endM, endD] = endDateRaw.split("-");
-    const MONTHS_ES = ["ene", "feb", "mar", "abr", "may", "jun", "jul", "ago", "sep", "oct", "nov", "dic"];
-    
-    const frontStart = `${parseInt(startD)} ${MONTHS_ES[parseInt(startM) - 1]}`;
-    const frontEnd = `${parseInt(endD)} ${MONTHS_ES[parseInt(endM) - 1]}`;
+    // 2. Lo que el frontend debería mostrar (fmtCampaignDate extrae YYYY-MM-DD directo)
+    const frontStart = fmtCampaignDate(c.startDate.toISOString());
+    const frontEnd = fmtCampaignDate(c.endDate.toISOString());
     
     console.log("  [FRONTEND DISPLAY]");
     console.log(`    startDate: ${frontStart}`);
     console.log(`    endDate:   ${frontEnd}`);
     
-    // 4. Verificación: ¿coincide con lo esperado?
+    // 3. Verificación: ¿coincide con lo esperado?
+    const [startY, startM, startD] = c.startDate.toISOString().slice(0, 10).split("-");
+    const [endY, endM, endD] = c.endDate.toISOString().slice(0, 10).split("-");
+    
     const expectedStart = `${parseInt(startD)} ${MONTHS_ES[parseInt(startM) - 1]}`;
     const expectedEnd = `${parseInt(endD)} ${MONTHS_ES[parseInt(endM) - 1]}`;
     
@@ -66,13 +80,36 @@ async function testCampaignDates() {
     console.log(`    startDate: ${startMatch ? "✅ OK" : "❌ MISMATCH"} (esperado: ${expectedStart}, obtenido: ${frontStart})`);
     console.log(`    endDate:   ${endMatch ? "✅ OK" : "❌ MISMATCH"} (esperado: ${expectedEnd}, obtenido: ${frontEnd})`);
     
-    // 5. Test del bug anterior (conversión incorrecta con new Date)
+    if (!startMatch || !endMatch) allPassed = false;
+    
+    // 4. Test del bug anterior (conversión incorrecta con new Date)
     const wrongStart = new Date(c.startDate).toLocaleDateString("es-ES", { day: "numeric", month: "short" });
     const wrongEnd = new Date(c.endDate).toLocaleDateString("es-ES", { day: "numeric", month: "short" });
     
     console.log("  [BUG ANTERIOR - new Date() conversion]");
-    console.log(`    startDate: ${wrongStart} ${wrongStart !== frontStart ? "⚠️ INCORRECTO" : "✅ igual"}`);
+    console.log(`    startDate: ${wrongStart} ${wrongStart !== frontStart ? "️ INCORRECTO" : "✅ igual"}`);
     console.log(`    endDate:   ${wrongEnd} ${wrongEnd !== frontEnd ? "⚠️ INCORRECTO" : "✅ igual"}`);
+    
+    // 5. Evaluaciones de esta campaña
+    console.log("  [EVALUACIONES]");
+    if (c.evaluations.length === 0) {
+      console.log("    (sin evaluaciones)");
+    } else {
+      for (const ev of c.evaluations) {
+        const userName = ev.user.name || ev.user.email;
+        console.log(`    Eval #${ev.id} - ${userName}`);
+        console.log(`      source: ${ev.source}`);
+        console.log(`      score: ${ev.totalScore}/${ev.maxScore}`);
+        if (ev.completedAt) {
+          const completedDate = fmtTimestamp(ev.completedAt.toISOString());
+          const completedTime = fmtTimestampTime(ev.completedAt.toISOString());
+          console.log(`      completedAt: ${completedDate} ${completedTime}`);
+          console.log(`      completedAt (ISO): ${ev.completedAt.toISOString()}`);
+        } else {
+          console.log(`      completedAt: (pendiente)`);
+        }
+      }
+    }
     
     console.log();
   }
@@ -90,6 +127,10 @@ async function testCampaignDates() {
   console.log("  El frontend en Perú (UTC-5) vería eso como 14 mayo 19:00 si usa new Date() directamente.");
   console.log("  La solución es extraer YYYY-MM-DD del ISO string sin conversión de zona horaria.");
   console.log();
+  
+  console.log("=".repeat(80));
+  console.log(`RESULTADO FINAL: ${allPassed ? "✅ TODAS LAS FECHAS SON CORRECTAS" : "❌ HAY ERRORES EN LAS FECHAS"}`);
+  console.log("=".repeat(80));
 
   await prisma.$disconnect();
 }

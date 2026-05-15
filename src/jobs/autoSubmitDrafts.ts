@@ -1,7 +1,7 @@
 import { prisma } from "../lib/prisma.ts";
 
 export async function autoSubmitDrafts() {
-  console.log("[autoSubmitDrafts] Running...");
+
 
   try {
     const now = new Date();
@@ -17,7 +17,6 @@ export async function autoSubmitDrafts() {
     });
 
     if (closedCampaigns.length === 0) {
-      console.log("[autoSubmitDrafts] No closed campaigns found");
       return 0;
     }
 
@@ -79,7 +78,7 @@ export async function autoSubmitDrafts() {
         });
 
         submittedCount++;
-        console.log(`[autoSubmitDrafts] Auto-submitted eval ${draftEval.id} for user ${draftEval.userId} (score: ${totalScore}/${currentMaxScore})`);
+
       }
     }
 

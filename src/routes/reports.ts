@@ -53,6 +53,9 @@ router.get("/monthly-comparison", authMiddleware, async (req: AuthRequest, res) 
     const excelenciaEval = evaluations.find(e => e.source === "EXCELENCIA");
     const misProgramasEval = evaluations.find(e => e.source === "MIS_PROGRAMAS");
 
+    const roundPct = (num: number) => Math.round(num * 10) / 10;
+    const roundAvg = (num: number) => Math.round(num * 100) / 100;
+
     // Helper: recalculate maxScore based on current questions for user's cargo
     const recalcMaxScore = async (evaluation: typeof excelenciaEval) => {
       if (!evaluation) return 0;
@@ -102,16 +105,20 @@ router.get("/monthly-comparison", authMiddleware, async (req: AuthRequest, res) 
     // Obtener detalle por pregunta
     const getQuestionDetails = (evaluation: typeof excelenciaEval) => {
       if (!evaluation) return [];
-      return evaluation.answers.map(a => ({
-        questionId: a.questionId,
-        questionText: a.question.text,
-        awardedScore: a.awardedScore,
-        optionSelected: a.option?.label || null,
-        optionText: a.option?.text || null,
-        maxScore: a.question.options.length > 0 ? Math.max(...a.question.options.map(o => o.score)) : 0,
-        hasFiles: a.files.length > 0,
-        files: a.files.map(f => ({ fileType: f.fileType, fileName: f.fileName })),
-      }));
+      return evaluation.answers.map(a => {
+        const currentOptionScore = a.option?.score ?? a.awardedScore ?? 0;
+        const currentMaxScore = a.question.options.length > 0 ? Math.max(...a.question.options.map(o => o.score ?? 0)) : 0;
+        return {
+          questionId: a.questionId,
+          questionText: a.question.text,
+          awardedScore: currentOptionScore,
+          optionSelected: a.option?.label || null,
+          optionText: a.option?.text || null,
+          maxScore: currentMaxScore,
+          hasFiles: a.files.length > 0,
+          files: a.files.map(f => ({ fileType: f.fileType, fileName: f.fileName })),
+        };
+      });
     };
 
     // Historial mensual (últimos 6 meses)
@@ -124,8 +131,7 @@ router.get("/monthly-comparison", authMiddleware, async (req: AuthRequest, res) 
       SELECT
         DATE_TRUNC('month', "completedAt") as month,
         source,
-        AVG("totalScore") as avg_score,
-        AVG("maxScore") as max_score,
+        AVG(CASE WHEN "maxScore" > 0 THEN ("totalScore"::float / "maxScore"::float) * 100 ELSE 0 END) as avg_pct,
         COUNT(*) as count
       FROM "Evaluation"
       WHERE "userId" = ${targetUserId}
@@ -138,8 +144,8 @@ router.get("/monthly-comparison", authMiddleware, async (req: AuthRequest, res) 
     const processedHistory = (monthlyHistory as any[]).map(row => ({
       ...row,
       count: typeof row.count === 'bigint' ? Number(row.count) : row.count,
-      avg_score: typeof row.avg_score === 'bigint' ? Number(row.avg_score) : Number(row.avg_score || 0),
-      max_score: typeof row.max_score === 'bigint' ? Number(row.max_score) : Number(row.max_score || 0),
+      avg_score: typeof row.avg_pct === 'bigint' ? Number(row.avg_pct) : roundAvg(Number(row.avg_pct || 0)),
+      max_score: 100,
     }));
 
     // Estadísticas por cargo (admin ve todos, user ve solo su cargo como benchmark)
@@ -185,11 +191,11 @@ router.get("/monthly-comparison", authMiddleware, async (req: AuthRequest, res) 
       cargo,
       excelencia: {
         count: scores.excelencia.length,
-        avg: scores.excelencia.length > 0 ? Math.round(scores.excelencia.reduce((a, b) => a + b, 0) / scores.excelencia.length) : 0,
+        avg: scores.excelencia.length > 0 ? roundAvg(scores.excelencia.reduce((a, b) => a + b, 0) / scores.excelencia.length) : 0,
       },
       misProgramas: {
         count: scores.misProgramas.length,
-        avg: scores.misProgramas.length > 0 ? Math.round(scores.misProgramas.reduce((a, b) => a + b, 0) / scores.misProgramas.length) : 0,
+        avg: scores.misProgramas.length > 0 ? roundAvg(scores.misProgramas.reduce((a, b) => a + b, 0) / scores.misProgramas.length) : 0,
       },
     }));
 
@@ -203,14 +209,14 @@ router.get("/monthly-comparison", authMiddleware, async (req: AuthRequest, res) 
         excelencia: excelenciaEval ? {
           totalScore: excelenciaTotalScore,
           maxScore: excelenciaMaxScore,
-          percentage: excelenciaMaxScore > 0 ? Math.round((excelenciaTotalScore / excelenciaMaxScore) * 100) : 0,
+          percentage: excelenciaMaxScore > 0 ? roundPct((excelenciaTotalScore / excelenciaMaxScore) * 100) : 0,
           completedAt: excelenciaEval.completedAt,
           questions: getQuestionDetails(excelenciaEval),
         } : null,
         misProgramas: misProgramasEval ? {
           totalScore: misProgramasTotalScore,
           maxScore: misProgramasMaxScore,
-          percentage: misProgramasMaxScore > 0 ? Math.round((misProgramasTotalScore / misProgramasMaxScore) * 100) : 0,
+          percentage: misProgramasMaxScore > 0 ? roundPct((misProgramasTotalScore / misProgramasMaxScore) * 100) : 0,
           completedAt: misProgramasEval.completedAt,
           questions: getQuestionDetails(misProgramasEval),
         } : null,

@@ -18,7 +18,6 @@ import { autoSubmitDrafts } from "./jobs/autoSubmitDrafts.ts";
 const JOB_INTERVAL_MS = 60 * 60 * 1000; // 1 hour
 
 function startScheduledJobs() {
-  console.log("[scheduler] Starting scheduled jobs (interval: 1h)...");
 
   // Run once on startup
   expireDelegations().catch(err => console.error("[scheduler] expireDelegations startup error:", err));
@@ -34,21 +33,23 @@ function startScheduledJobs() {
   }, JOB_INTERVAL_MS);
 }
 
-console.log(">>> Starting server...");
+
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
 app.use(cors({
   origin: [
-    "http://localhost:5173", 
-    "http://localhost:5174", 
+    "http://localhost:5173",
+    "http://localhost:5174",
     "http://127.0.0.1:5173",
     "https://pauserdistribucionessac.com",
     "https://www.pauserdistribucionessac.com",
+    "https://api.pauserdistribucionessac.com",
     process.env.FRONTEND_URL || ""
   ].filter(Boolean),
-  credentials: true,
+  methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+  allowedHeaders: ["Content-Type", "Authorization"],
 }));
 
 app.use(express.json({ limit: "50mb" }));
@@ -85,12 +86,12 @@ app.use("/uploads", express.static(uploadsDir));
 
 
 app.get("/api/test", (req, res) => {
-  console.log(">>> /api/test called");
+
   res.json({ test: "ok" });
 });
 
 app.get("/api/health", (req, res) => {
-  console.log(">>> /api/health called");
+
   res.json({ status: "ok", timestamp: new Date().toISOString() });
 });
 
@@ -121,7 +122,7 @@ app.use((err: any, req: express.Request, res: express.Response, next: express.Ne
   res.status(500).json({ error: err.message || "Internal server error" });
 });
 
-console.log(">>> About to listen...");
+
 
 app.listen(PORT, () => {
   console.log(`🚀 Servidor corriendo en http://localhost:${PORT}`);

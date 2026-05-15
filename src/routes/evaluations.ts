@@ -102,10 +102,17 @@ router.post("/submit", authMiddleware, async (req: AuthRequest, res) => {
 
     const campaignQuestionIds = campaignQuestions.map(cq => cq.questionId);
 
+    // BUG FIX: when no campaign-specific questions are mapped, fall back to
+    // questions of the same targetType as the evaluation source (not ALL questions).
+    const sourceTargetTypes = source === "MIS_PROGRAMAS"
+      ? ["MIS_PROGRAMAS", "AMBOS"]
+      : ["EXCELENCIA", "AMBOS"];
     const allQuestions = await prisma.question.findMany({
       where: {
         isActive: true,
-        ...(campaignQuestionIds.length > 0 && { id: { in: campaignQuestionIds } }),
+        ...(campaignQuestionIds.length > 0
+          ? { id: { in: campaignQuestionIds } }
+          : { targetType: { in: sourceTargetTypes } }),
       },
       include: {
         cargos: true,
@@ -139,17 +146,31 @@ router.post("/submit", authMiddleware, async (req: AuthRequest, res) => {
     if (!evaluation) {
       // First submission - create evaluation
       let totalScore = 0;
-      const answersData = answers
-        .filter((a: any) => {
-          // Skip questions without optionId AND without files (incomplete answers)
-          const hasOption = a.optionId != null && a.optionId !== '';
-          const hasFiles = a.files && Array.isArray(a.files) && a.files.length > 0;
-          return a?.questionId && (hasOption || hasFiles);
-        })
+
+      // Pre-load any questions that the cargo filter missed (e.g. shared evaluations
+      // where optionId comes from a group member with a different cargo).
+      const answersWithOption = answers.filter((a: any) => {
+        const hasOption = a.optionId != null && a.optionId !== '';
+        const hasFiles = a.files && Array.isArray(a.files) && a.files.length > 0;
+        return a?.questionId && (hasOption || hasFiles);
+      });
+      const missingIds = answersWithOption
+        .map((a: any) => a.questionId)
+        .filter((id: number) => !relevantQuestions.find((q: any) => q.id === id));
+      let extraQuestions: any[] = [];
+      if (missingIds.length > 0) {
+        extraQuestions = await prisma.question.findMany({
+          where: { id: { in: missingIds } },
+          include: { options: true, cargos: true },
+        });
+      }
+      const allAvailableQuestions = [...relevantQuestions, ...extraQuestions];
+
+      const answersData = answersWithOption
         .map((a: any) => {
           const hasFiles = a.files && Array.isArray(a.files) && a.files.length > 0;
           const validFiles = hasFiles ? a.files.filter((f: any) => f && f.fileUrl) : [];
-          const question = relevantQuestions.find((q) => q.id === a.questionId);
+          const question = allAvailableQuestions.find((q: any) => q.id === a.questionId);
           
           // Get selected option and calculate score
           const selectedOptionId = a.optionId ? parseInt(a.optionId) : null;
@@ -162,7 +183,7 @@ router.post("/submit", authMiddleware, async (req: AuthRequest, res) => {
             }
           }
 
-          // Calculate current period based on frequency
+          // Calculate current period based on frequency (always uses real question data)
           const { periodStart, periodEnd } = getCurrentPeriod(
             question?.frequencyType || "UNICA",
             question?.frequencyDay || null,
@@ -192,8 +213,8 @@ router.post("/submit", authMiddleware, async (req: AuthRequest, res) => {
           };
         });
 
-      const maxScore = relevantQuestions.reduce((sum, q) => {
-        const maxOptionScore = (q as any).options?.length > 0 
+      const maxScore = relevantQuestions.reduce((sum: number, q: any) => {
+        const maxOptionScore = (q as any).options?.length > 0
           ? Math.max(...(q as any).options.map((opt: any) => opt.score || 0))
           : 0;
         return sum + maxOptionScore;
@@ -392,7 +413,16 @@ for (const ans of allAnswersUpdated1) {
         if (!hasOption && !hasFiles) continue;
 
         const validFiles = hasFiles ? a.files.filter((f: any) => f && f.fileUrl) : [];
-        const question = relevantQuestions.find((q) => q.id === a.questionId);
+        // Try to find question in cargo-filtered list first; if not found (e.g. shared
+        // evaluation where question belongs to a different cargo), load from DB directly
+        // so we never lose the correct frequencyType/options/score.
+        let question: any = relevantQuestions.find((q) => q.id === a.questionId);
+        if (!question) {
+          question = await prisma.question.findUnique({
+            where: { id: a.questionId },
+            include: { options: true, cargos: true },
+          });
+        }
 
         const selectedOptionId = a.optionId ? parseInt(a.optionId) : null;
         let awardedScore = 0;
@@ -404,7 +434,7 @@ for (const ans of allAnswersUpdated1) {
           }
         }
 
-        // Calculate current period
+        // Calculate current period using the real question frequency (never fall back to UNICA)
         const { periodStart, periodEnd } = getCurrentPeriod(
           question?.frequencyType || "UNICA",
           question?.frequencyDay || null,
@@ -491,16 +521,40 @@ for (const ans of allAnswersUpdated1) {
         }
       }
 
-      // Update total score
+      // Update total score and maxScore
       const allAnswers = await prisma.answer.findMany({
         where: { evaluationId: evaluation.id },
       });
       const newTotalScore = allAnswers.reduce((sum, a) => sum + (a.awardedScore || 0), 0);
 
+      // Recalculate maxScore from current relevant questions
+      const campaignQIds = await prisma.campaignQuestion.findMany({
+        where: { campaignId },
+        select: { questionId: true },
+      });
+      const cqIds = campaignQIds.map(c => c.questionId);
+      // BUG FIX: if no campaign-specific questions are mapped, only fall back to
+      // questions of the same targetType (EXCELENCIA) — never all system questions.
+      const campaignQuestions = await prisma.question.findMany({
+        where: cqIds.length > 0
+          ? { id: { in: cqIds }, isActive: true }
+          : { isActive: true, targetType: { in: ["EXCELENCIA", "AMBOS"] } },
+        include: { cargos: true, options: true },
+      });
+      const userCargoData = await prisma.user.findUnique({ where: { id: userId }, select: { cargoId: true } });
+      const relevantQs = campaignQuestions.filter(q => {
+        if (q.cargos.length === 0) return true;
+        return q.cargos.some(qc => qc.cargoId === userCargoData?.cargoId);
+      });
+      const newMaxScore = relevantQs.reduce((sum, q) => {
+        return sum + (q.options?.length > 0 ? Math.max(...q.options.map(o => o.score || 0)) : 0);
+      }, 0);
+
       evaluation = await prisma.evaluation.update({
         where: { id: evaluation.id },
         data: {
           totalScore: newTotalScore,
+          maxScore: newMaxScore,
           completedAt: now,
         },
         include: { answers: { include: { files: true } } },
@@ -610,13 +664,25 @@ router.get("/results", authMiddleware, async (req: AuthRequest, res) => {
     });
 
     // Fetch all active questions with their cargo assignments and options
+    // BUG FIX: only load EXCELENCIA questions so we don't pollute maxScore with
+    // MIS_PROGRAMAS questions that belong to a completely separate evaluation flow.
     const allQuestions = await prisma.question.findMany({
-      where: { isActive: true },
+      where: { isActive: true, targetType: { in: ["EXCELENCIA", "AMBOS"] } },
       include: { 
         cargos: true,
         options: true,
       },
     });
+
+    // Build a map of campaign → question IDs for accurate per-campaign filtering
+    const allCampaignQuestions = await prisma.campaignQuestion.findMany({
+      select: { campaignId: true, questionId: true },
+    });
+    const campaignQMap = new Map<number, Set<number>>();
+    for (const cq of allCampaignQuestions) {
+      if (!campaignQMap.has(cq.campaignId)) campaignQMap.set(cq.campaignId, new Set());
+      campaignQMap.get(cq.campaignId)!.add(cq.questionId);
+    }
 
     // Fetch all submissions for recalculating scores
     const allSubmissions = await prisma.questionSubmission.findMany({});
@@ -624,11 +690,18 @@ router.get("/results", authMiddleware, async (req: AuthRequest, res) => {
     // Recalculate maxScore and totalScore dynamically based on current questions
     const results = evaluations.map((evaluation: any) => {
       const userCargoId = evaluation.user.cargoId;
+      const campaignQIds = campaignQMap.get(evaluation.campaignId);
+
+      // Get questions scoped to this evaluation's campaign (or all EXCELENCIA if no mapping)
+      const campaignQuestions = campaignQIds && campaignQIds.size > 0
+        ? allQuestions.filter(q => campaignQIds.has(q.id))
+        : allQuestions;
 
       // Get questions that apply to this user's cargo
-    const relevantQuestions = allQuestions.filter((q) => {
-      return q.cargos.some((qc) => qc.cargoId === userCargoId);
-    });
+      const relevantQuestions = campaignQuestions.filter((q) => {
+        if (q.cargos.length === 0) return true;
+        return q.cargos.some((qc) => qc.cargoId === userCargoId);
+      });
 
       // Calculate maxScore based on current questions and their max option scores
       const currentMaxScore = relevantQuestions.reduce((sum, q) => {
@@ -965,6 +1038,7 @@ router.get("/my-result", authMiddleware, async (req: AuthRequest, res) => {
     });
 
     const relevantQuestions = allQuestions.filter((q) => {
+      if (q.cargos.length === 0) return true;
       return q.cargos.some((qc) => qc.cargoId === userCargoId);
     });
 
@@ -1304,16 +1378,24 @@ router.put("/answers/:answerId/review", authMiddleware, async (req: AuthRequest,
       },
     });
 
-    // Recalculate total admin score for evaluation
+    // Recalculate admin sum (only reviewed answers)
     const evaluation = answer.evaluation;
     const totalAdminScore = evaluation.answers.reduce((sum, a) => {
       if (a.id === answerId) return sum + (adminScore || 0);
       return sum + (a.adminScore || 0);
     }, 0);
 
+    // Keep totalScore as the automatic score (sum of awardedScore, NOT adminScore)
+    // so that "Puntaje Automático" is never corrupted by admin reviews.
+    const autoTotalScore = evaluation.answers.reduce((sum, a) => {
+      return sum + (a.awardedScore || 0);
+    }, 0);
+
     await prisma.evaluation.update({
       where: { id: evaluation.id },
-      data: { totalScore: totalAdminScore },
+      data: {
+        totalScore: autoTotalScore,   // preserve automatic score (awardedScore sum)
+      },
     });
 
     res.json({ message: "Calificación guardada", answer, totalAdminScore });
@@ -1627,7 +1709,23 @@ router.get("/user/:userId/campaign/:campaignId/details", authMiddleware, async (
       }
     });
 
-    res.json(evaluations);
+    // Compute autoScore, adminScore, reviewedCount and totalAnswers for each evaluation
+    // (same logic as /all endpoint so EvaluationBlock displays correct values)
+    const result = evaluations.map((ev) => {
+      const autoScore = ev.answers.reduce((sum, a) => sum + (a.awardedScore || 0), 0);
+      const adminScore = ev.answers.reduce((sum, a) => sum + (a.adminScore || 0), 0);
+      const reviewedCount = ev.answers.filter((a) => a.adminScore !== null).length;
+      return {
+        ...ev,
+        autoScore,
+        adminScore: adminScore > 0 ? adminScore : null,
+        reviewedCount,
+        totalAnswers: ev.answers.length,
+        isComplete: ev.completedAt !== null,
+      };
+    });
+
+    res.json(result);
   } catch (error) {
     console.error("Error fetching user combined details:", error);
     res.status(500).json({ error: "Error al obtener detalle combinado de evaluaciones" });
@@ -2009,7 +2107,7 @@ router.post("/answer", authMiddleware, async (req: AuthRequest, res) => {
     }, 0);
 
     const newTotalScore = allEvalAnswers.reduce((sum, a) => {
-      return sum + (a.option?.score || a.awardedScore || 0);
+      return sum + (a.awardedScore || 0);
     }, 0);
 
     await prisma.evaluation.update({
